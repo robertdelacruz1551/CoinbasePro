@@ -11,6 +11,8 @@ Info:
     
     
 Use:
+
+    download the project from github, and instantiate the class
     
     ws = CoinbaseProWebsocketClient(
               products= [ 'BTC-USD', ETH-BTC, ... ], 
