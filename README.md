@@ -12,7 +12,7 @@ Info:
     
 Use:
     
-    ws = WebsocketClient(
+    ws = CoinbaseProWebsocketClient(
               products= [ 'BTC-USD', ETH-BTC, ... ], 
               channels= [ 'level2', 'ticker' ], 
               credentials={ 'passphrase': 'api-passphrase', 'key': 'api-key', 'b64secret': 'api-b64secret==' }, 
