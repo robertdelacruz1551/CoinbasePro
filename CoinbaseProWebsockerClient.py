@@ -20,7 +20,7 @@ class CoinbaseProWebsocketClient():
     supported products: - BTC-USD, LTC-USD, ETH-USD, ETC-USD, LTC-BTC, ETH-BTC, ETC-BTC
     
     @use:
-    ws = WebsocketClient(products, channels, credentials=None, production=True)
+    ws = CoinbaseProWebsocketClient(products, channels, credentials=None, production=True)
     
     @params ( '*' required ):
     products * : List of products to listen for update
