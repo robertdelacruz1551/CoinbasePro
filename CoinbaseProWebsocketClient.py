@@ -7,7 +7,8 @@ from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
 from random import randint
 
-class CoinbaseProWebsocketClient():
+
+class CoinbaseWebsocket():
     """
     @info:
     Websocket client used to connect to the Coinbase exchange. Listening to the websocket for 
@@ -20,7 +21,7 @@ class CoinbaseProWebsocketClient():
     supported products: - BTC-USD, LTC-USD, ETH-USD, ETC-USD, LTC-BTC, ETH-BTC, ETC-BTC
     
     @use:
-    ws = CoinbaseProWebsocketClient(products, channels, credentials=None, production=True)
+    ws = CoinbaseWebsocket(products, channels, credentials=None, production=True)
     
     @params ( '*' required ):
     products * : List of products to listen for update
@@ -156,8 +157,7 @@ class CoinbaseProWebsocketClient():
             self.data[ticker['product_id']]['ticker']['history'].append( {'time': ticker['time'],'price': ticker['price'] })
             self.data[ticker['product_id']]['ticker']['current'] = ticker
         except Exception as e:
-            print("Error processing Ticker update: Message -> {}".format(e))
-            print(ticker)
+            self.on_error(None, "Error processing Ticker update: Message -> {} \n {}".format(e, ticker))
             pass
         
     def Orders(self, order):
@@ -229,7 +229,8 @@ class CoinbaseProWebsocketClient():
 
             self.data[order['product_id']]['orders']['live'].fillna(0,inplace=True)
         except Exception as e:
-            print("Error updating live orders. Error message: {} \n {}".format(e, update))
+            self.messages.append(update)
+            self.on_error(None, "Error updating live orders. Will try to update. Error message: {} \n {}".format(e, update))
             pass
         
         
@@ -300,9 +301,9 @@ class CoinbaseProWebsocketClient():
             raise Exception("Process raised an error: {}".format(e))
 
     def subscriptionMsg(self):
-        """Creates the subscription request message. Clients subscribed to just the user \n channel will also be subscribed to the hearbeat channel to keep the ws open \n during gaps of inactivity"""
+        """Creates the subscription request message. Heartbeat is added to all subscription messages"""
         channels = self.channels
-        if len(channels) == 1 and channels[0] == 'user':
+        if 'heartbeat' not in self.channels:
             channels = ['heartbeat'] + channels
 
         parameters = {
@@ -359,6 +360,14 @@ class CoinbaseProWebsocketClient():
         else:
             print("Connection already closed")
 
+#    def restart(self, products=[], channels[], credentials=None):
+#        """Restarts the subscription"""
+#        if self.ws:
+#            self.close()
+#        self.products    = products or self.products
+#        self.channels    = channels or self.channels
+#        self.credentials = credentials or self.credentials
+        
     def open(self):
         """This method will create a new thread to run the listen method. Listen will instantiate \n a new WebSocketApp(). If the connection closes and it was not initiated by the client, then restart else close"""
         def listen():
@@ -383,12 +392,12 @@ class CoinbaseProWebsocketClient():
                     reconnectAttempts = 10
                     raise Exception("Could not subscribe to channels {} for products {}. Exiting".format(', '.join(self.channels), ', '.join(self.products)))
             except Exception as e:
-                print(e)
+                self.on_error(self.ws, "Error from self.open -> {}".format(e))
+                pass
             finally:
                 monitor.join()
                 if self.terminated:
-                    if self.ws:
-                        self.ws.close()
+                    self.close()
                 else:
                     if reconnectAttempts < 10:
                         print("Restarting connection")
