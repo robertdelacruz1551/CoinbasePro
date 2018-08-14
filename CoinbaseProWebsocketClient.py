@@ -266,7 +266,7 @@ class CoinbaseWebsocket():
         """Monitors the messages received and processes them individually"""
         procs = np.min([len(self.products), 4])
         def preprocess(product):
-            msgs = [x for x in self.messages if x['type'] in self.acceptedType and x['product_id'] == product ]
+            msgs = [x for x in self.messages if 'product_id' in x and x['product_id'] == product ]
             for msg in msgs:
                 self.process(msg)
         
