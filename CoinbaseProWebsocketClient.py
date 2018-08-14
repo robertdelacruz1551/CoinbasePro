@@ -136,7 +136,7 @@ class CoinbaseWebsocket():
     
         self.data = dict((product, {
             'ticker'   : { 'history': [], 
-                           'current': None },
+                           'live': None },
             'orderbook': { 'snapshot': False,
                            'live': pd.DataFrame([],columns=['price','size','side']) },
             'orders'   : { 'fee_rate': 0.0025 if 'BTC' in product else 0.003,
@@ -155,7 +155,7 @@ class CoinbaseWebsocket():
                     ticker[col] = 0.0
             ticker['time'] = time.time()
             self.data[ticker['product_id']]['ticker']['history'].append( {'time': ticker['time'],'price': ticker['price'] })
-            self.data[ticker['product_id']]['ticker']['current'] = ticker
+            self.data[ticker['product_id']]['ticker']['live'] = ticker
         except Exception as e:
             self.on_error(None, "Error processing Ticker update: Message -> {} \n {}".format(e, ticker))
             pass
