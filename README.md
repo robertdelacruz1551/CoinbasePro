@@ -14,7 +14,7 @@ Use:
 
     download the project from github, and instantiate the class
     
-    ws = CoinbaseProWebsocketClient(
+    ws = CoinbaseWebsocket(
               products= [ 'BTC-USD', ETH-BTC, ... ], 
               channels= [ 'level2', 'ticker' ], 
               credentials={ 'passphrase': 'api-passphrase', 'key': 'api-key', 'b64secret': 'api-b64secret==' }, 
@@ -37,7 +37,7 @@ Variables:
     data   : dictionary data variable stores the consumable websocket messages post processing. 
     
     structure:
-             BTC-USD: { 'ticker'   : { 'history': list  , 'current': None },
+             BTC-USD: { 'ticker'   : { 'history': list  , 'live': None },
                         'orderbook': { 'live': dataframe },
                         'orders'   : { 'fee_rate': float, 'records': [], 'live': dataframe } }
     
@@ -49,7 +49,7 @@ Variables:
                       {'time': 1533828452.0009532,'price': 4385.01 },
                       ...
                     ], 
-                   'current': {
+                   'live': {
                         'best_ask': 6423.08,
                         'best_bid': 6422.59,
                         'high_24h': 6485.76,
