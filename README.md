@@ -1,4 +1,6 @@
 # CoinbaseProWebsocketClient
+Looking for contributors
+
 Info:
     Websocket client used to connect to the Coinbase exchange. Listening to the websocket for 
     updates instead of polling the server via HTTP calls is highly recomment to decrease overhead and 
