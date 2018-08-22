@@ -1,4 +1,4 @@
-import time, base64, hmac, hashlib, json, datetime
+import time, base64, hmac, hashlib, json
 import pandas as pd
 import numpy as np
 from threading import Thread
@@ -6,7 +6,6 @@ from websocket import create_connection, WebSocketApp, WebSocketConnectionClosed
 from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
 from random import randint
-
 
 class CoinbaseWebsocket():
     """
@@ -113,6 +112,7 @@ class CoinbaseWebsocket():
         self.opened       = False
         self.c            = None
         
+        
         for c in self.channels:
             if c not in ['ticker', 'level2', 'user']:
                 print( "{} is not a subscribable channels".format(c))
@@ -123,17 +123,16 @@ class CoinbaseWebsocket():
             if p not in ['BTC-USD','LTC-USD','ETH-USD','ETC-USD','LTC-BTC','ETH-BTC','ETC-BTC']:
                 print( "{} is not a subscribable product".format(c) )
             elif self.ready > 0:
-                self.ready = 1
-        
-        self.acceptedType = ['errors']
+                self.ready = 1           
+            
+        self.acceptedType = ['errors']               
         if "ticker" in self.channels:
             self.acceptedType = self.acceptedType + ["ticker"]
         if "level2" in self.channels:
             self.acceptedType = self.acceptedType + ["snapshot","l2update"]
         if "user" in self.channels:
             self.acceptedType = self.acceptedType + ["received","open","done","match","change","activate"]
-        
-    
+
         self.data = dict((product, {
             'ticker'   : { 'history': [], 
                            'live': None },
@@ -141,10 +140,11 @@ class CoinbaseWebsocket():
                            'live': pd.DataFrame([],columns=['price','size','side']) },
             'orders'   : { 'fee_rate': 0.0025 if 'BTC' in product else 0.003,
                            'records': [], 
-                           'live': pd.DataFrame(data=[], columns=['order_id','create_time','update_time','product_id','order_type','side','stop_price','price','size','funds','holdings','taker_fee_rate','status']) }
+                           'live': pd.DataFrame(data=[], columns=['order_id','create_time','update_time','product_id','order_type','side','stop_price',
+                                                                  'price','size','funds','holdings','taker_fee_rate','status']) }
         }) for product in self.products)
-        
 
+                
     def Ticker(self, ticker):
         """Receives the ticker updates and retains the history and updates the 'current' attribute in self.data.ticker"""
         try:
@@ -154,8 +154,9 @@ class CoinbaseWebsocket():
                 except:
                     ticker[col] = 0.0
             ticker['time'] = time.time()
-            self.data[ticker['product_id']]['ticker']['history'].append( {'time': ticker['time'],'price': ticker['price'] })
+            #self.data[ticker['product_id']]['ticker']['history'].append( {'time': ticker['time'],'price': ticker['price'] })
             self.data[ticker['product_id']]['ticker']['live'] = ticker
+
         except Exception as e:
             self.on_error(None, "Error processing Ticker update: Message -> {} \n {}".format(e, ticker))
             pass
@@ -278,7 +279,7 @@ class CoinbaseWebsocket():
                     pool.close()
                     pool.join()
             except Exception as e:
-                print("Monitoring Error: {}".format(e))
+                self.on_error(None, "Monitoring Error: {}".format(e))
                 continue
             finally:
                 time.sleep(0.1)   
@@ -329,7 +330,13 @@ class CoinbaseWebsocket():
     
     def on_message(self, ws, message):
         """Appends the message from the ws to the list of messages to process later"""
-        self.messages.append(json.loads(message))
+        message = json.loads(message)
+        if message['type'] == 'error':
+            self.on_error(None, message['message'])
+        elif message['type'] == 'subscriptions':
+            print("Subscribed to {}".format(', '.join([ channel['name'] for channel in message['channels'] ])))
+        elif message['type'] in self.acceptedType:
+            self.messages.append(message)
         
     def on_error(self, ws, error):
         """Prints the errors"""
@@ -341,13 +348,13 @@ class CoinbaseWebsocket():
 
     def on_close(self, ws):
         """Confirms closed connection"""
-        print("Connection closed")
+        print("Closing connection")
         
     def on_open(self, ws):
         """Sends the initial subscription message to the server"""
         ws.send(self.subscription)
         self.opened = True
-        print("Connected, and subscribed to channels {}".format(', '.join(self.channels)))
+        print("Connected. Awaiting subscription message. {}".format(self.url))
 
     def close(self):
         """Sets the terminate variable to true to indicate that the connection was closed \n by the client. This will prevent self.start from restarting when the closed message is received"""
@@ -358,16 +365,8 @@ class CoinbaseWebsocket():
             self.opened = False
             self.thread.join()
         else:
-            print("Connection already closed")
+            print("Closed")
 
-#    def restart(self, products=[], channels[], credentials=None):
-#        """Restarts the subscription"""
-#        if self.ws:
-#            self.close()
-#        self.products    = products or self.products
-#        self.channels    = channels or self.channels
-#        self.credentials = credentials or self.credentials
-        
     def open(self):
         """This method will create a new thread to run the listen method. Listen will instantiate \n a new WebSocketApp(). If the connection closes and it was not initiated by the client, then restart else close"""
         def listen():
