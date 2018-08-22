@@ -32,7 +32,7 @@ class CoinbaseWebsocket():
 
     @variables:
     data   : dictionary data variable stores the consumable websocket messages post processing. structure
-             BTC-USD: { 'ticker'   : { 'history': list  , 'current': None },
+             BTC-USD: { 'ticker'   : { 'history': list  , 'live': None },
                         'orderbook': { 'live': dataframe },
                         'orders'   : { 'fee_rate': float, 'records': [], 'live': dataframe } }
     
@@ -44,7 +44,7 @@ class CoinbaseWebsocket():
                       {'time': 1533828452.0009532,'price': 4385.01 },
                       ...
                     ], 
-                   'current': {
+                   'live': {
                         'best_ask': 6423.08,
                         'best_bid': 6422.59,
                         'high_24h': 6485.76,
@@ -136,7 +136,7 @@ class CoinbaseWebsocket():
     
         self.data = dict((product, {
             'ticker'   : { 'history': [], 
-                           'current': None },
+                           'live': None },
             'orderbook': { 'snapshot': False,
                            'live': pd.DataFrame([],columns=['price','size','side']) },
             'orders'   : { 'fee_rate': 0.0025 if 'BTC' in product else 0.003,
@@ -144,7 +144,9 @@ class CoinbaseWebsocket():
                            'live': pd.DataFrame(data=[], columns=['order_id','create_time','update_time','product_id','order_type','side','stop_price','price','size','funds','holdings','taker_fee_rate','status']) }
         }) for product in self.products)
         
-
+    def ohlc(self, price):
+        pass
+        
     def Ticker(self, ticker):
         """Receives the ticker updates and retains the history and updates the 'current' attribute in self.data.ticker"""
         try:
@@ -155,7 +157,7 @@ class CoinbaseWebsocket():
                     ticker[col] = 0.0
             ticker['time'] = time.time()
             self.data[ticker['product_id']]['ticker']['history'].append( {'time': ticker['time'],'price': ticker['price'] })
-            self.data[ticker['product_id']]['ticker']['current'] = ticker
+            self.data[ticker['product_id']]['ticker']['live'] = ticker
         except Exception as e:
             self.on_error(None, "Error processing Ticker update: Message -> {} \n {}".format(e, ticker))
             pass
@@ -266,7 +268,7 @@ class CoinbaseWebsocket():
         """Monitors the messages received and processes them individually"""
         procs = np.min([len(self.products), 4])
         def preprocess(product):
-            msgs = [x for x in self.messages if x['type'] in self.acceptedType and x['product_id'] == product ]
+            msgs = [x for x in self.messages if 'product_id' in x and x['product_id'] == product ]
             for msg in msgs:
                 self.process(msg)
         
@@ -278,7 +280,7 @@ class CoinbaseWebsocket():
                     pool.close()
                     pool.join()
             except Exception as e:
-                print("Monitoring Error: {}".format(e))
+                self.on_error(None, "Monitoring Error: {}".format(e))
                 continue
             finally:
                 time.sleep(0.1)   
