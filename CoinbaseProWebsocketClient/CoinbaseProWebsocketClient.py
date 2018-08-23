@@ -31,9 +31,9 @@ class CoinbaseWebsocket():
 
     @variables:
     data   : dictionary data variable stores the consumable websocket messages post processing. structure
-             BTC-USD: { 'ticker'   : { 'history': list  , 'live': None },
-                        'orderbook': { 'live': dataframe },
-                        'orders'   : { 'fee_rate': float, 'records': [], 'live': dataframe } }
+             'BTC-USD': { 'ticker'   : { 'history': list  , 'live': None },
+                        'orderbook': { 'live': dataframe } },
+             'orders' : { 'records': [], 'live': dataframe }
     
     example: >>> ws.data['BTC-USD']['ticker']
                  { 
@@ -69,9 +69,8 @@ class CoinbaseWebsocket():
                             
                  }
                  
-             >>> ws.data['BTC-USD']['orders']
+             >>> ws.data['orders']
                  {
-                     'fee_rate': 0.0025,
                      'records': [
                          { "type": "received", "time": "2014-11-07T08:19:27.028459Z", "product_id": "BTC-USD", "sequence": 10, "order_id": "d50ec984-77a8-460a-b958-66f114b0de9b", "size": "1.34", "price": "502.1", "side": "buy", "order_type": "limit" },
                          { "type": "open", "time": "2014-11-07T08:19:27.028459Z", "product_id": "BTC-USD", "sequence": 10, "order_id": "d50ec984-77a8-460a-b958-66f114b0de9b", "price": "200.2", "remaining_size": "1.00", "side": "sell" },
@@ -134,16 +133,11 @@ class CoinbaseWebsocket():
             self.acceptedType = self.acceptedType + ["received","open","done","match","change","activate"]
 
         self.data = dict((product, {
-            'ticker'   : { 'history': [], 
-                           'live': None },
-            'orderbook': { 'snapshot': False,
-                           'live': pd.DataFrame([],columns=['price','size','side']) },
-            'orders'   : { 'fee_rate': 0.0025 if 'BTC' in product else 0.003,
-                           'records': [], 
-                           'live': pd.DataFrame(data=[], columns=['order_id','create_time','update_time','product_id','order_type','side','stop_price',
-                                                                  'price','size','funds','holdings','taker_fee_rate','status']) }
+            'ticker'   : { 'history': [], 'live': None },
+            'orderbook': { 'snapshot': False, 'live': pd.DataFrame([],columns=['price','size','side']) }
         }) for product in self.products)
-
+        self.data['orders'] = { 'records': [], 'live': pd.DataFrame(data=[], columns=['order_id','create_time','update_time','product_id','order_type','side',
+                                                                                      'stop_price','price','size','funds','holdings','taker_fee_rate','status']) }
                 
     def Ticker(self, ticker):
         """Receives the ticker updates and retains the history and updates the 'current' attribute in self.data.ticker"""
@@ -160,11 +154,11 @@ class CoinbaseWebsocket():
         except Exception as e:
             self.on_error(None, "Error processing Ticker update: Message -> {} \n {}".format(e, ticker))
             pass
-        
+
     def Orders(self, order):
         """This method receives and processes orders submitted by the client"""
         # keep the raw dict
-        self.data[order['product_id']]['orders']['records'].append(order)
+        self.data['orders']['records'].append(order)
       
         # process live update
         update= {
@@ -189,51 +183,51 @@ class CoinbaseWebsocket():
 
         try:
             if update['type'] in ['received']:
-                already_received = self.data[order['product_id']]['orders']['live'][ self.data[order['product_id']]['orders']['live']['order_id'] == update['order_id']]
+                already_received = self.data['orders']['live'][ self.data['orders']['live']['order_id'] == update['order_id']]
                 if len(already_received): index = already_received.index.min()
                 else:                     index = int(update['sequence'])
 
                 columns = ['order_id','order_type','product_id','side','create_time','update_time','status','price','taker_fee_rate']
                 if update['order_type']!='market': columns = columns + ['size','funds','holdings']
 
-                self.data[order['product_id']]['orders']['live'].loc[ index , columns ] = [ update[col] for col in columns ]
+                self.data['orders']['live'].loc[ index , columns ] = [ update[col] for col in columns ]
 
             elif update['type'] in ['open']:
-                self.data[order['product_id']]['orders']['live'].loc[  (self.data[order['product_id']]['orders']['live']['order_id'] == update['order_id']), ['price', 'update_time', 'status'] ] = [ update[col] for col in ['price','time','status'] ] 
+                self.data['orders']['live'].loc[  (self.data['orders']['live']['order_id'] == update['order_id']), ['price', 'update_time', 'status'] ] = [ update[col] for col in ['price','time','status'] ] 
 
             elif update['type'] in ['activate']:
-                self.data[order['product_id']]['orders']['live'].loc[ randint(1,10000), ['order_id','stop_price','product_id','side','size','price','order_type','taker_fee_rate','create_time','update_time','status'] 
+                self.data['orders']['live'].loc[ randint(1,10000), ['order_id','stop_price','product_id','side','size','price','order_type','taker_fee_rate','create_time','update_time','status'] 
                                                            ] = [ update[col] for col in ['order_id','limit_price','product_id','side','size','stop_price','stop_type' ,'taker_fee_rate','create_time','update_time','type'] ]
 
             elif update['type'] in ['match']:
-                taker = self.data[order['product_id']]['orders']['live'][self.data[order['product_id']]['orders']['live']['order_id'] == update['taker_order_id'] ].to_dict('records')
+                taker = self.data['orders']['live'][self.data['orders']['live']['order_id'] == update['taker_order_id'] ].to_dict('records')
                 if len(taker):
                     UPDATE = [int(update['sequence'])] + [taker[0][col] for col in ['order_id','order_type','product_id','side','create_time','taker_fee_rate'] ] + [update[col] for col in ['update_time','price','size'] ] + ['filled']
                 else:
-                    maker  = self.data[order['product_id']]['orders']['live'][ self.data[order['product_id']]['orders']['live']['order_id'] == update['maker_order_id']][['order_id','order_type','product_id','side','create_time','taker_fee_rate', 'update_time','price','size','status'] ]
+                    maker  = self.data['orders']['live'][ self.data['orders']['live']['order_id'] == update['maker_order_id']][['order_id','order_type','product_id','side','create_time','taker_fee_rate', 'update_time','price','size','status'] ]
                     UPDATE = [maker.index.min()] + maker.iloc[0].values.tolist()
 
-                self.data[order['product_id']]['orders']['live'].loc[ UPDATE[0], ['order_id','order_type','product_id','side','create_time','taker_fee_rate', 'update_time','price','size','status'] ] = UPDATE[1:]   
+                self.data['orders']['live'].loc[ UPDATE[0], ['order_id','order_type','product_id','side','create_time','taker_fee_rate', 'update_time','price','size','status'] ] = UPDATE[1:]   
 
                 if update['side'] == 'buy': m = -1
                 else:                       m =  1
 
                 if UPDATE[2] == 'market': 
                     m = m*-1
-                    UPDATE[-5] = self.data[order['product_id']]['orders']['fee_rate']
-                                                   
+                    UPDATE[-5] = 0.0025 if 'BTC' in order['product_id'] else 0.003 
+
                         # m*((price * size) + ((m*-1)(price * size * fee rate)))
-                self.data[order['product_id']]['orders']['live'].loc[ UPDATE[0], ['funds','holdings','taker_fee_rate' ]] =  [ m*((UPDATE[-3] * UPDATE[-2]) + ((m*-1)*(UPDATE[-3] * UPDATE[-2] * UPDATE[-5]))), (m*-1)*UPDATE[-2], UPDATE[-5] ]    
+                self.data['orders']['live'].loc[ UPDATE[0], ['funds','holdings','taker_fee_rate' ]] =  [ m*((UPDATE[-3] * UPDATE[-2]) + ((m*-1)*(UPDATE[-3] * UPDATE[-2] * UPDATE[-5]))), (m*-1)*UPDATE[-2], UPDATE[-5] ]    
 
             elif update['type'] in ['done']:
-                self.data[order['product_id']]['orders']['live'].loc[ (self.data[order['product_id']]['orders']['live']['order_id'] == update['order_id']), ['status'] ] = update['reason']
+                self.data['orders']['live'].loc[ (self.data['orders']['live']['order_id'] == update['order_id']), ['status'] ] = update['reason']
 
-            self.data[order['product_id']]['orders']['live'].fillna(0,inplace=True)
+            self.data['orders']['live'].fillna(0,inplace=True)
         except Exception as e:
             self.messages.append(update)
             self.on_error(None, "Error updating live orders. Will try to update. Error message: {} \n {}".format(e, update))
             pass
-        
+
         
     def OrderBook(self, orders):
         """Receives the level 2 snapshot and the subsequent updates and updates the orderbook"""
@@ -348,7 +342,7 @@ class CoinbaseWebsocket():
 
     def on_close(self, ws):
         """Confirms closed connection"""
-        print("Closing connection")
+        print("Connection closed")
         
     def on_open(self, ws):
         """Sends the initial subscription message to the server"""
@@ -364,8 +358,6 @@ class CoinbaseWebsocket():
             self.ws = None
             self.opened = False
             self.thread.join()
-        else:
-            print("Closed")
 
     def open(self):
         """This method will create a new thread to run the listen method. Listen will instantiate \n a new WebSocketApp(). If the connection closes and it was not initiated by the client, then restart else close"""
