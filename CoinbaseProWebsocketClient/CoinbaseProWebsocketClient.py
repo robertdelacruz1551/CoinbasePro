@@ -170,8 +170,7 @@ class CoinbaseWebsocket():
                      'remaining_size', 'sequence', 'side', 'size', 'stop_price', 'stop_type','taker_fee_rate', 'taker_order_id', 'time', 'trade_id', 'type','holdings' ]:
             try:
                 # store the value
-                if col in ['funds', 'limit_price','new_funds','new_size','old_size','old_funds','price',
-                           'remaining_size','sequence','size','stop_price','taker_fee_rate']:
+                if col in ['funds','limit_price','new_funds','new_size','old_size','old_funds','price','remaining_size','size','stop_price','taker_fee_rate']:
                     value = float(order[col])
                 else:
                     value = order[col]
@@ -185,47 +184,49 @@ class CoinbaseWebsocket():
             if update['type'] in ['received']:
                 already_received = self.data['orders']['live'][ self.data['orders']['live']['order_id'] == update['order_id']]
                 if len(already_received): index = already_received.index.min()
-                else:                     index = int(update['sequence'])
+                else:                     index = update['sequence']
 
-                columns = ['order_id','order_type','product_id','side','create_time','update_time','status','price','taker_fee_rate']
+                columns = ['order_id','order_type','product_id','side','create_time','update_time','price','status','taker_fee_rate']
                 if update['order_type']!='market': columns = columns + ['size','funds','holdings']
 
                 self.data['orders']['live'].loc[ index , columns ] = [ update[col] for col in columns ]
 
             elif update['type'] in ['open']:
-                self.data['orders']['live'].loc[  (self.data['orders']['live']['order_id'] == update['order_id']), ['price', 'update_time', 'status'] ] = [ update[col] for col in ['price','time','status'] ] 
+                self.data['orders']['live'].loc[ (self.data['orders']['live']['order_id'] == update['order_id']) & (~self.data['orders']['live']['status'].isin(['canceled','filled'])), ['size', 'update_time', 'status'] ] = [ update[col] for col in ['remaining_size','update_time','status'] ] 
 
             elif update['type'] in ['activate']:
-                self.data['orders']['live'].loc[ randint(1,10000), ['order_id','stop_price','product_id','side','size','price','order_type','taker_fee_rate','create_time','update_time','status'] 
-                                                           ] = [ update[col] for col in ['order_id','limit_price','product_id','side','size','stop_price','stop_type' ,'taker_fee_rate','create_time','update_time','type'] ]
+                columns = ['order_id','product_id','side','size','taker_fee_rate','create_time','update_time','status']
+                self.data['orders']['live'].loc[ randint(1,10000), columns + ['stop_price','price','order_type'] ] = [ update[col] for col in columns + ['limit_price','stop_price','stop_type'] ]
 
             elif update['type'] in ['match']:
-                taker = self.data['orders']['live'][self.data['orders']['live']['order_id'] == update['taker_order_id'] ].to_dict('records')
-                if len(taker):
-                    UPDATE = [int(update['sequence'])] + [taker[0][col] for col in ['order_id','order_type','product_id','side','create_time','taker_fee_rate'] ] + [update[col] for col in ['update_time','price','size'] ] + ['filled']
-                else:
-                    maker  = self.data['orders']['live'][ self.data['orders']['live']['order_id'] == update['maker_order_id']][['order_id','order_type','product_id','side','create_time','taker_fee_rate', 'update_time','price','size','status'] ]
-                    UPDATE = [maker.index.min()] + maker.iloc[0].values.tolist()
+                if update['side'] == 'buy': multiplier = -1
+                else: multiplier =  1
+                
+                existing_order = self.data['orders']['live'][ self.data['orders']['live']['order_id'].isin([ update['taker_order_id'], update['maker_order_id'] ]) ].head(1)
+                if existing_order['order_id'].max() == update['taker_order_id']:
+                    UPDATE = [update[col] for col in ['sequence','update_time','price','size'] ] + existing_order[['order_id','order_type','product_id','side','create_time','taker_fee_rate']].iloc[0].values.tolist() + ['filled']
+                    # UPDATE[-2] = 0.0025 if 'BTC' in order['product_id'] else 0.003
 
-                self.data['orders']['live'].loc[ UPDATE[0], ['order_id','order_type','product_id','side','create_time','taker_fee_rate', 'update_time','price','size','status'] ] = UPDATE[1:]   
+                    multiplier = -(multiplier)
+                
+                elif existing_order['order_id'].max() == update['maker_order_id']:
+                    UPDATE = [existing_order.index.min()] + [update['update_time']] + existing_order[['price','size','order_id','order_type','product_id','side','create_time','taker_fee_rate','status']].iloc[0].values.tolist()
 
-                if update['side'] == 'buy': m = -1
-                else:                       m =  1
+                self.data['orders']['live'].loc[ UPDATE[0], ['update_time','price','size','order_id','order_type','product_id','side','create_time','taker_fee_rate','status','funds','holdings'] ] = UPDATE[1:] + [0,0]  
 
-                if UPDATE[2] == 'market': 
-                    m = m*-1
-                    UPDATE[-5] = 0.0025 if 'BTC' in order['product_id'] else 0.003 
-
+               
                         # m*((price * size) + ((m*-1)(price * size * fee rate)))
-                self.data['orders']['live'].loc[ UPDATE[0], ['funds','holdings','taker_fee_rate' ]] =  [ m*((UPDATE[-3] * UPDATE[-2]) + ((m*-1)*(UPDATE[-3] * UPDATE[-2] * UPDATE[-5]))), (m*-1)*UPDATE[-2], UPDATE[-5] ]    
+                # self.data['orders']['live'].loc[ UPDATE[0], ['funds','holdings','taker_fee_rate' ]] =  [ m*((UPDATE[-3] * UPDATE[-2]) + ((m*-1)*(UPDATE[-3] * UPDATE[-2] * UPDATE[-5]))), (m*-1)*UPDATE[-2], UPDATE[-5] ]  
+                self.data['orders']['live'].loc[ UPDATE[0], 'funds']          +=  (multiplier*((update['price'] * update['size']) + (-(multiplier)*(update['price'] * update['size'] * UPDATE[-2]))))
+                self.data['orders']['live'].loc[ UPDATE[0], 'holdings']       +=  (-(multiplier)*update['size']) 
 
             elif update['type'] in ['done']:
-                self.data['orders']['live'].loc[ (self.data['orders']['live']['order_id'] == update['order_id']), ['status'] ] = update['reason']
+                self.data['orders']['live'].loc[ (self.data['orders']['live']['order_id'] == update['order_id']) & (~self.data['orders']['live']['status'].isin(['canceled','filled'])), ['status'] ] = update['reason']
 
             self.data['orders']['live'].fillna(0,inplace=True)
         except Exception as e:
             self.messages.append(update)
-            self.on_error(None, "Error updating live orders. Will try to update. Error message: {} \n {}".format(e, update))
+            self.on_error(None, "\n Error updating live orders. Will try to update. Error message: {} \n {}".format(e, None))
             pass
 
         
