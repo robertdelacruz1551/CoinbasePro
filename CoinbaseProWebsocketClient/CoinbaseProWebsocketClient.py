@@ -6,7 +6,7 @@ from websocket import create_connection, WebSocketApp, WebSocketConnectionClosed
 from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
 from random import randint
-from CoinbaseProWebsocketClient.Utilities import OrderManagement
+from CoinbaseProWebsocketClient.Utilities import OrderManagement, OrderBookManagement
 
 class CoinbaseWebsocket():
     """
@@ -32,8 +32,13 @@ class CoinbaseWebsocket():
 
     @variables:
     data   : dictionary data variable stores the consumable websocket messages post processing. structure
-             'BTC-USD': { 'ticker'   : { 'history': list  , 'live': None },
-                        'orderbook': { 'live': dataframe } },
+             'BTC-USD': { 
+                'ticker': { 
+                     'history': list, 
+                     'live': None 
+                },
+                'orderbook': instance of OrderBookManagement class 
+             },
              'orders' : instance of OrderManagement class
     
     example: >>> ws.data['BTC-USD']['ticker']
@@ -62,14 +67,35 @@ class CoinbaseWebsocket():
                         'volume_30d': 307449.79720148}
                     }
                  
-             >>> ws.data['BTC-USD']['orderbook']
-                 {
-                    'live': DataFrame
-                            Columns: [size,side] // float, string
-                            Index: [price]       // float
-                            
-                 }
-                 
+             >>> ws.data['BTC-USD']['orderbook'].book
+                DataFrame
+                Columns: [size, side]
+                Index: [price]
+
+                example:
+                          size      side
+                price                   
+                7037.95   0.000000  asks
+                7036.54   0.000000  bids
+                7036.16   0.000000  asks
+                ...
+
+             >>> ws.data['BTC-USD']['orderbook'].asks(remove_zeros=True)
+                     price      size
+                0  7032.33  2.576296
+                1  7033.00  0.030000
+                2  7033.06  0.026360
+                ...
+                Note: remove_zeros=True will remove price levels with a size value of 0
+
+             >>> ws.data['BTC-USD']['orderbook'].bids(remove_zeros=True)
+                    price       size
+                0  7032.32  19.915242
+                1  7032.31   1.000000
+                2  7031.77   0.001000
+                ...  
+                Note: remove_zeros=True will remove price levels with a size value of 0
+
              >>> ws.data['orders'].records
                 [
                     { "type": "received", "time": "2014-11-07T08:19:27.028459Z", "product_id": "BTC-USD", "sequence": 10, "order_id": "d50ec984-77a8-460a-b958-66f114b0de9b", "size": "1.34", "price": "502.1", "side": "buy", "order_type": "limit" },
@@ -135,7 +161,7 @@ class CoinbaseWebsocket():
 
         self.data = dict((product, {
             'ticker'   : { 'history': [], 'live': None },
-            'orderbook': { 'snapshot': False, 'live': pd.DataFrame([],columns=['price','size','side']) }
+            'orderbook': OrderBookManagement()
         }) for product in self.products)
         self.data['orders'] = OrderManagement()
                 
@@ -154,34 +180,6 @@ class CoinbaseWebsocket():
         except Exception as e:
             self.on_error(None, "Error processing Ticker update: Message -> {} \n {}".format(e, ticker))
             pass
-
-        
-    def OrderBook(self, orders):
-        """Receives the level 2 snapshot and the subsequent updates and updates the orderbook"""
-        try:
-            def update(product, side, change):
-                try:
-                    self.data[product]['orderbook']['live'].loc[ float(change[1].rstrip('0')), ['size','side'] ] = [ float(change[2]), side ]
-                except Exception as e:
-                    raise Exception("UPDATE method raised error: {}".format(e))
-
-            if orders['type'] == 'l2update':
-                if self.data[orders['product_id']]['orderbook']['snapshot']:                    
-                    for order in orders['changes']:
-                        update(orders['product_id'], 'bids' if order[0]=='buy' else 'asks', order)
-                else:
-                    self.messages.append(orders)
-
-            elif orders['type'] == 'snapshot' and not self.data[orders['product_id']]['orderbook']['snapshot']:
-                for side in ['bids','asks']:
-                    df = pd.DataFrame( data=orders[side], columns=['price','size'] ).head(250)[['price','size']].apply(pd.to_numeric, **{'errors':'ignore'})
-                    df['side'] = side
-                    self.data[orders['product_id']]['orderbook']['live'] = pd.concat( [self.data[orders['product_id']]['orderbook']['live'], df] )
-                self.data[orders['product_id']]['orderbook']['live'].set_index('price', inplace=True)
-                self.data[orders['product_id']]['orderbook']['snapshot'] = True
-
-        except Exception as e:
-            self.on_error(None, "Error processing OrderBook update: Message -> {}".format(e))
 
             
     def monitor(self):
@@ -214,7 +212,7 @@ class CoinbaseWebsocket():
                 if message['type'] in ["ticker"]:
                     self.Ticker(message)
                 elif message['type'] in ["snapshot", "l2update"]:
-                    self.OrderBook(message)
+                    self.data[message['product_id']]['orderbook'].update( message )
                 elif message['type'] in ["received","open","done","match","change","activate"]:
                     self.data['orders'].update( message )
             elif message['type'] == 'error':
