@@ -1,9 +1,7 @@
 # CoinbaseProWebsocketClient
-<<<<<<< HEAD
 No affiliation with Coinbase
-=======
 Looking for contributors
->>>>>>> 71decec71b20401d7c92474a3f6ff1d70b52d1ed
+
 
 Info:
     Websocket client used to connect to the Coinbase exchange. Listening to the websocket for 
