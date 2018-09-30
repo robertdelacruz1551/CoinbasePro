@@ -14,7 +14,7 @@ setup(
     # Any executable scripts, typically in 'bin'. E.g 'bin/do-something.py'
     scripts=[],
     # REQUIRED: Your project's URL
-    url='https://github.com/robertdelacruz1551/CoinbaseProWebsocketClient',
+    url='https://github.com/robertdelacruz1551/CoinbasePro',
     # Put your license here. See LICENSE.txt for more information
     license='MIT',
     keywords=['bitcoin', 'ethereum', 'BTC', 'ETH', 'client','exchange', 'crypto', 'currency', 'coinbase','market'],
