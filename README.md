@@ -11,39 +11,34 @@ Info:
    - Coinbase Pro API Docs: https://docs.pro.coinbase.com/#websocket-feed
     
     supported channels: - ticker, level2, orderbook
-    supported products: - BTC-USD, LTC-USD, ETH-USD, ETC-USD, LTC-BTC, ETH-BTC, ETC-BTC
+    supported products: - BTC-USD, LTC-USD, ETH-USD, ETC-USD, LTC-BTC, ETH-BTC, ETC-BTC, BCH-USD, BCH-BTC
     
     
 Use:
 
     download the project from github, and instantiate the class
     
-    ws = CoinbaseWebsocket(
-              products= [ 'BTC-USD', ETH-BTC, ... ], 
+    ws = Client()
+    ws.open(  products= [ 'BTC-USD', ETH-BTC, ... ], 
               channels= [ 'level2', 'ticker' ], 
               credentials={ 'passphrase': 'api-passphrase', 'key': 'api-key', 'b64secret': 'api-b64secret==' }, 
-              production=True
-         )
-    ws.open()
-    ws.data # variable has the updates
+              production=True )
+    ws.data # variable keeps the updates from Coinbase
     ws.close()
-    
-Parameters ( '*' required ):
-
-    products * : List of products to listen for update
-    channels * : List of channels to subscribe to
-    credentials: Dictionary with the API credentials needed to connect to Coinbase
-    production : Boolean. if set to True the websocket will connect via url 'wss://ws-feed.pro.coinbase.com' 
-                 else if set to False the websocket will connect via url 'wss://ws-feed-public.sandbox.pro.coinbase.com'
 
 Variables:
 
     data   : dictionary data variable stores the consumable websocket messages post processing. 
     
     structure:
-             BTC-USD: { 'ticker'   : { 'history': list  , 'live': None },
-                        'orderbook': { 'live': dataframe },
-                        'orders'   : { 'fee_rate': float, 'records': [], 'live': dataframe } }
+             'BTC-USD': { 
+                'ticker': { 
+                     'history': list, 
+                     'live': None 
+                },
+                'orderbook': instance of OrderBookManagement class 
+             },
+             'orders' : instance of OrderManagement class
     
     example: >>> ws.data['BTC-USD']['ticker']
                  { 
@@ -71,31 +66,48 @@ Variables:
                         'volume_30d': 307449.79720148}
                     }
                  
-             >>> ws.data['BTC-USD']['orderbook']
-                 {
-                    'live': DataFrame
-                            Columns: [size,side] // float, string
-                            Index: [price]       // float
-                            
-                 }
-                 
-             >>> ws.data['BTC-USD']['orders']
-                 {
-                     'fee_rate': 0.0025,
-                     'records': [
-                         { "type": "received", "time": "2014-11-07T08:19:27.028459Z", "product_id": "BTC-USD", "sequence": 10, "order_id": "d50ec984-77a8-460a-b958-66f114b0de9b", "size": "1.34", "price": "502.1", "side": "buy", "order_type": "limit" },
-                         { "type": "open", "time": "2014-11-07T08:19:27.028459Z", "product_id": "BTC-USD", "sequence": 10, "order_id": "d50ec984-77a8-460a-b958-66f114b0de9b", "price": "200.2", "remaining_size": "1.00", "side": "sell" },
-                         ...
-                     ],
-                     'live': DataFrame
-                             Columns: [order_id, create_time, update_time, product_id, order_type, side, stop_price, price, size, funds, holdings, taker_fee_rate, status]
-                             Index: []
-                 }
+             >>> ws.data['BTC-USD']['orderbook'].book
+                DataFrame
+                Columns: [size, side]
+                Index: [price]
+
+                example:
+                          size      side
+                price                   
+                7037.95   0.000000  asks
+                7036.54   0.000000  bids
+                7036.16   0.000000  asks
+                ...
+
+             >>> ws.data['BTC-USD']['orderbook'].asks(remove_zeros=True)
+                     price      size
+                0  7032.33  2.576296
+                1  7033.00  0.030000
+                2  7033.06  0.026360
+                ...
+                Note: remove_zeros=True will remove price levels with a size value of 0
+
+             >>> ws.data['BTC-USD']['orderbook'].bids(remove_zeros=True)
+                    price       size
+                0  7032.32  19.915242
+                1  7032.31   1.000000
+                2  7031.77   0.001000
+                ...  
+                Note: remove_zeros=True will remove price levels with a size value of 0
+
+             >>> ws.data['orders'].records
+                [
+                    { "type": "received", "time": "2014-11-07T08:19:27.028459Z", "product_id": "BTC-USD", "sequence": 10, "order_id": "d50ec984-77a8-460a-b958-66f114b0de9b", "size": "1.34", "price": "502.1", "side": "buy", "order_type": "limit" },
+                    { "type": "open", "time": "2014-11-07T08:19:27.028459Z", "product_id": "BTC-USD", "sequence": 10, "order_id": "d50ec984-77a8-460a-b958-66f114b0de9b", "price": "200.2", "remaining_size": "1.00", "side": "sell" },
+                    ...
+                ]
+
+             >>> ws.data['orders'].orders
+                DataFrame
+                Columns: [sequence, order_id, create_time, update_time, product_id, order_type, side, stop_price, price, size, USD, BTC, LTC, ETH, BCH, ETC, taker_fee_rate, status]
+                Index: []
     
 methods:
-
-    open() : opens the connection to the websocket. The method first creates the subscription message then opens the 
-             connection. The function opens a new thread and tries to connect. If the connection closes unexpectedly 
-             the class will attempt to reconnect 10 time before it stops.
-       
+    open( products, channels, credentials, production ): Opens the connection and subscribes to the given channels for the given products
+    add
     close(): closes the connection to the websocket. This method does not clear out the data variable.
