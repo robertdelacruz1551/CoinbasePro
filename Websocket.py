@@ -1,10 +1,9 @@
-import time, base64, hmac, hashlib, json
+import time, base64, hmac, hashlib, json, datetime
 import pandas as pd
 import numpy as np
 from random import randint
-import pandas as pd
 from threading import Thread
-from websocket import create_connection, WebSocketApp, WebSocketConnectionClosedException
+from websocket import WebSocketApp#, WebSocketConnectionClosedException
 from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
 from random import randint
@@ -20,14 +19,21 @@ class Client():
            - API Docs: https://docs.pro.coinbase.com/#websocket-feed
     
     supported channels: - ticker, level2, user
-    supported products: - BTC-USD, LTC-USD, ETH-USD, ETC-USD, LTC-BTC, ETH-BTC, ETC-BTC, BCH-USD, BCH-BTC
+    supported products: - All available products through the Coinbase Pro exchange
     
     @use:
-    ws = CoinbaseWebsocket(products, channels, credentials=None, production=True)
+    ws = Client(production=True,
+                credentials={ YOUR CREDENTIALS },
+                user  = True, 
+                level2= [ 'BTC-USD', ... ],
+                ticker= [ 'BTC-USD','ETH-USD', ... ],
+                ohlc  = [ [ 'BTC-USD','1min','15min' ],[ 'ETH-USD', '1hour' ], ... ] )
     
-    @params ( '*' required ):
-    products * : List of products to listen for update
-    channels * : List of channels to subscribe to
+    @params:
+    tickers    : List of products which are subscribed to the tickers channel
+    level2     : List of products which are subscribed to the level2 channel
+    user       : boolean to subscribe to the users channels. ( REQUIRES CREDENTIALS )
+    ohlc       : List of products and candle increments to manage. Example [[ 'BTC-USD', '1min', '5min', '15min', '1hour', '6hour', '1day' ]]
     credentials: Dictionary with the API credentials needed to connect to Coinbase
     production : Boolean. if set to True the websocket will connect via url 'wss://ws-feed.pro.coinbase.com' 
                  else if set to False the websocket will connect via url 'wss://ws-feed-public.sandbox.pro.coinbase.com'
@@ -35,24 +41,21 @@ class Client():
     @variables:
     data   : dictionary data variable stores the consumable websocket messages post processing. structure
              'BTC-USD': { 
-                'ticker': { 
-                     'history': list, 
-                     'live': None 
-                },
+                'ticker': instance of Ticker class,
                 'orderbook': instance of OrderBookManagement class,
                 'ohlc': instance of OHLC class
              },
              'orders' : instance of OrderManagement class
     
-    example: >>> ws.data['BTC-USD']['ticker']
-                 { 
-                    'history': 
+    example: 
+             >>> ws.data['BTC-USD']['ticker'].history =  
                     [ 
                       {'time': 1533828390.86529,'price': 4388.01 }, 
                       {'time': 1533828452.0009532,'price': 4385.01 },
                       ...
-                    ], 
-                   'live': {
+                    ]
+                    
+             >>> ws.data['BTC-USD']['ticker'].live = {
                         'best_ask': 6423.08,
                         'best_bid': 6422.59,
                         'high_24h': 6485.76,
@@ -118,123 +121,43 @@ class Client():
                 Index: []
     
     @methods:
-    open( products, channels, credentials, production ): Opens the connection and subscribes to the given channels for the given products
-    add
+    open() : Opens the connection and subscribes to the given channels for the given products
     close(): closes the connection to the websocket. This method does not clear out the data variable.
     """
     
-    def __init__(self): 
+    def __init__(self, production=False, ticker=[], level2=[], user=[], ohlc=[], credentials=None ):
+        self.url            = 'wss://ws-feed-public.sandbox.pro.coinbase.com'
+        self.production     = production
+        
+        self._ticker         = ticker
+        self._level2         = level2
+        self._user           = user
+        self._ohlc           = ohlc
+        self._credentials    = credentials
+
+        self.message_count  = 0
+        
+        if self.production:  
+            self.url        = 'wss://ws-feed.pro.coinbase.com'
+        self.SUBSCRIPTION   = self.subscription( self.ticker, self._level2, self._user, self._credentials )
+        self.data           = self.set_data( self.SUBSCRIPTION, self.ohlc, self.production )
         self.messages       = []
         self.ws             = None
-        self.subscription   = None
         self.conn_thread    = None
         self.terminated     = False
-        self.errorCnt       = 0
-        self.data           = { }
-        
-        self.products       = []
-        self.channels       = []
+        self.error_count    = 0
 
-        self.PRODUCTS       = ['BTC-USD','LTC-USD','ETH-USD','ETC-USD','LTC-BTC','ETH-BTC','ETC-BTC','BCH-USD','BCH-BTC']
-        self.CHANNELS       = ['ticker','level2','user']
-        self.accepted_message_type = ['errors']   
+        self.PRODUCTS       = ['BTC-USD','LTC-USD','ETH-USD','ETC-USD','LTC-BTC','ETH-BTC','ETC-BTC','BCH-USD','BCH-BTC','ZRX-USD','ZRX-BTC']
+        self.accepted_message_type = ["error","ticker","snapshot","l2update","received","open","done","match","change","activate"] 
         self.max_errors_allowed = 100    
-
-                
-    def Ticker(self, ticker):
-        """Receives the ticker updates and retains the history and updates the 'current' attribute in self.data.ticker"""
-        try:
-            for col in ['price', 'last_size', 'best_bid', 'best_ask','high_24h','low_24h','open_24h','volume_24h','volume_30d' ]:
-                try:
-                    ticker[col] = float(ticker[col].rstrip('0'))
-                except:
-                    ticker[col] = 0.0
-            ticker['time'] = time.time()
-            self.data[ticker['product_id']]['ticker']['history'].append( {'time': ticker['time'],'price': ticker['price'] })
-            self.data[ticker['product_id']]['ticker']['live'] = ticker
-            
-            # Supports OHLC. This updates the candles
-            for increment in self.data[ticker['product_id']]['ohlc']:
-                self.data[ticker['product_id']]['ohlc'][increment].update(ticker)
-                
-        except Exception as e:
-            self.on_error(None, "Error processing Ticker update: Message -> {} \n {}".format(e, ticker))
-            pass
-
-            
-    def monitor(self):
-        """Monitors the messages received and processes them individually"""
-        procs = np.min([len(self.products), 4])
-        def preprocess(product):
-            msgs = [x for x in self.messages if 'product_id' in x and x['product_id'] == product ]
-            for msg in msgs:
-                self.process(msg)
-        
-        while not self.terminated:
-            try:
-                if self.messages:
-                    pool = ThreadPool(procs)
-                    pool.map(preprocess, self.products)
-                    pool.close()
-                    pool.join()
-            except Exception as e:
-                self.on_error(None, "Monitoring Error: {}".format(e))
-                continue
-            finally:
-                time.sleep(0.1)   
-        
-                    
-    def process(self, message):
-        """This method removes the message received from the list of messages, then routes \n the message to the appropriate function"""
-        try:
-            self.messages.remove(message)
-            if message['type'] in self.accepted_message_type[1:]:
-                if message['type'] in ["ticker"]:
-                    self.Ticker(message)
-                elif message['type'] in ["snapshot", "l2update"]:
-                    self.data[message['product_id']]['orderbook'].update( message )
-                elif message['type'] in ["received","open","done","match","change","activate"]:
-                    self.data['orders'].update( message )
-            elif message['type'] == 'error':
-                self.on_error(None, message['message'])
-        except Exception as e:
-            raise Exception("Process raised an error: {}".format(e))
-
-
-    def subscription_message(self, products, channels, credentials):
-        """Creates the subscription request message. Heartbeat is added to all subscription messages"""
-        self.products = self.verify_products_n_channels(products, self.PRODUCTS, 'products', True )
-        self.channels = self.verify_products_n_channels(channels, self.CHANNELS, 'channels', False)
-
-        if 'heartbeat' not in self.channels:
-            self.channels.append('heartbeat')
-            
-        parameters = {
-            "type": "subscribe",
-            "product_ids": self.products,
-            "channels": self.channels
-        }
-        
-        if credentials: 
-            # this code was copied from https://github.com/danpaquin/gdax-python
-            timestamp = str(time.time())
-            message = timestamp + 'GET' + '/users/self/verify'
-            message = message.encode('ascii')
-            hmac_key = base64.b64decode(credentials['b64secret'])
-            signature = hmac.new(hmac_key, message, hashlib.sha256)
-            signature_b64 = base64.b64encode(signature.digest()).decode('utf-8').rstrip('\n')
-            parameters['signature'] = signature_b64
-            parameters['key']       = credentials['key']
-            parameters['passphrase']= credentials['passphrase']
-            parameters['timestamp'] = timestamp
-
-        return json.dumps(parameters)
+  
     
 
     def on_message(self, ws, message):
         """Appends the message from the ws to the list of messages to process later"""
+        self.message_count += 1
         message = json.loads(message)
-        if message['type'] == 'error':
+        if   message['type'] == 'error':
             self.on_error(None, message['message'])
         elif message['type'] == 'subscriptions':
             print("Subscribed to {}".format(', '.join([ channel['name'] for channel in message['channels'] ])))
@@ -245,36 +168,37 @@ class Client():
     def on_error(self, ws, error):
         """Prints the errors"""
         print(error)
-        if self.errorCnt == self.max_errors_allowed:
+        if self.error_count == self.max_errors_allowed:
+            print("{}: Exceeded error count. Terminating connection".format(datetime.datetime.now()))
             self.close()
         else:
-            self.errorCnt += 1
+            self.error_count += 1
 
+            
     def on_close(self, ws):
-        """Confirms closed connection"""
-        print("Connection closed")
+        if self.terminated:
+            print("Connection closed")
+        else:
+            print("{}: Connection unexpectedly closed. Re-establishing a connection.".format(datetime.datetime.now()))
+            self.SUBSCRIPTION   = self.subscription( self.ticker, self._level2, self._user, self._credentials )
+            self.connect()
+        
         
     def on_open(self, ws):
         """Sends the initial subscription message to the server"""
-        ws.send(self.subscription)
         self.terminated = False
+        ws.send(json.dumps(self.SUBSCRIPTION))
         print("Connected. Awaiting subscription message. {}".format(self.url))
 
-    def close(self):
-        """Sets the terminate variable to true to indicate that the connection was closed \n by the client. This will prevent self.start from restarting when the closed message is received"""
-        self.terminated = True
-        if self.ws:
-            self.ws.close()
-            self.ws = None
-            self.opened = False
-            if self.conn_thread:
-                self.conn_thread.join()
+    # ==============================================================================
+    # The following methods handle creating a connection and monitoring of the feed
+    # ==============================================================================
 
     def connect(self):
         try:
+            self.terminated = False
             monitor = Thread(target=self.monitor, name='Monitor method')
             monitor.start()
-            
             self.ws = WebSocketApp(
                 url          = self.url,
                 on_open      = self.on_open, 
@@ -284,80 +208,177 @@ class Client():
                 keep_running = True
             )
             self.ws.run_forever()
+            monitor.join()
         except Exception as e:
             monitor.join()
             raise Exception('Connection failed. Error {}'.format(e))
-
-
-    def verify_products_n_channels(self, items, valid, item_type, upper_case=False):
-        if type(items) is not list:
-            items = [ items ]
-        valid = [ item.upper() if upper_case else item for item in items if item.upper() in ' '.join(valid).upper().split(' ') ]
-        if not valid:
-            raise Exception("No valid {} received".format(item_type))
-        else:
-            return valid
-
-
-    def set_accepted_message_types(self, channels):               
-        if "ticker" in channels:
-            self.accepted_message_type += ["ticker"]
-        if "level2" in channels:
-            self.accepted_message_type += ["snapshot","l2update"]
-        if "user" in channels:
-            self.accepted_message_type += ["received","open","done","match","change","activate"]
-
-
-    def set_data(self, products, increments=[]):
-        return {
-                 **{ product: { 
-                     'ticker' :   { 'history': [], 'live': None }, 
-                     'orderbook': OrderBookManagement(),
-                     'ohlc':      { increment: OHLC(product, increment) for increment in increments}, } for product in products }, 
-                 **{ 'orders': OrderManagement() } 
-               }
-
-    
-    def add_subscription(self, products=[], channels=[], increments=[], credentials=None):
-        try:
-            if not self.terminated and self.ws:
-                
-                self.products += products
-                self.channels += channels
-                
-                self.set_accepted_message_types(channels)
-                self.data = { **self.set_data(products, increments), **self.data }
-                subscription = self.subscription_message( self.products, self.channels, credentials ) 
-                self.ws.send(subscription)
-            else:
-                raise Exception("Websocket connection is not open. Only add subscription after opening connection. To initialize a new connection ws.open({},{},{})".format(products, channels, credentials))
-        except Exception as e:
-            raise Exception("Failed to add subscription. Error {}".format(e))
-
             
-    def open(self, products, channels, increments=[], credentials=None, production=True):
+    def monitor(self):
+        """Monitors the messages received and processes them individually"""
+        messages_processed = 0       
+        while not self.terminated:
+            try:
+                if messages_processed < self.message_count:
+                    pool = ThreadPool(4)
+                    pool.map(self.process, self.messages)
+                    pool.close()
+                    pool.join()
+                else:
+                    if self.ws:
+                        self.ws.close()
+            except Exception as e:
+                self.on_error(None, "Monitoring Error: {}".format(e))
+                continue
+            finally:
+                messages_processed = self.message_count
+                time.sleep(1)   
+                
+    def process_tickers(self, message):
+        if 'ticker' in self.data[message['product_id']]:
+            self.data[message['product_id']]['ticker'].update( message )
+            if 'ohlc' in self.data[message['product_id']]:
+                for ohlc in self.data[message['product_id']]['ohlc']:
+                    self.data[message['product_id']]['ohlc'][ohlc].update( self.data[message['product_id']]['ticker'].live )
+    
+    def process_orderbook(self, message):
+        if 'orderbook' in self.data[message['product_id']]:
+            self.data[message['product_id']]['orderbook'].update( message )
+        
+    def process(self, message):
+        """This method removes the message received from the list of messages, then routes \n the message to the appropriate function"""
+        try:
+            self.messages.remove(message)
+        except:
+            pass # nothing to see here, just a message that was already processed and is not on the list any more
+        
+        try:
+            if message['type'] in self.accepted_message_type[1:]:
+                if message['type'] in ["ticker"]:
+                    self.process_tickers(message)
+                elif message['type'] in ["snapshot", "l2update"]:
+                    self.process_orderbook(message)
+                elif message['type'] in ["received","open","done","match","change","activate"] and 'user' in self.data:
+                    self.data['user'].update( message )
+            elif message['type'] == 'error':
+                self.on_error(None, message['message'])
+        except Exception as e:
+            raise Exception("Process raised an error: {}\n\t{}".format(e,message))
+
+    # ==============================================================================
+    # Data exploration methods
+    # ==============================================================================
+    def orderbook(self, product):
+        return self.data[product]['orderbook'].book
+
+    def ticker(self, product):
+        return self.data[product]['ticker'].live
+
+    def ohlc(self, product, ohlc):
+        return self.data[product]['ohlc'][ohlc].candles
+
+    # ==============================================================================
+    # the following methods handle the creation of the subscription 
+    # and managing connections
+    # ==============================================================================
+
+    def set_data(self, SUBSCRIPTION, OHLC_, PRODUCTION):
+        data = { **{ product: { } for product in self.SUBSCRIPTION['product_ids'] } }
+        for channel in SUBSCRIPTION['channels']:
+            if not isinstance(channel, str):
+                if channel['name'] == 'ticker':
+                    for product in channel['product_ids']:
+                        data[ product ][ 'ticker' ]    = Ticker()
+                if channel['name'] == 'level2':
+                    for product in channel['product_ids']:
+                        data[ product ][ 'orderbook' ] = OrderBookManagement()
+            elif channel == 'user':
+                data[ 'user' ] = OrderManagement()
+        for candles in OHLC_:
+            data[candles[0]]['ohlc'] = { increment: OHLC( candles[0], increment ) for increment in candles[1:] }
+            time.sleep(1)
+        
+        return data
+
+    def subscription(self, ticker=None, level2=None, user=None, credentials=None):
+        subscription = {
+            'type': 'subscribe',
+            'product_ids': list(set(ticker + level2)),
+            'channels': ['heartbeat']
+        }
+        if user:   subscription['channels'].append( 'user'  )
+        if ticker: subscription['channels'].append( { 'name':'ticker', 'product_ids': list(set(ticker)) } )
+        if level2: subscription['channels'].append( { 'name':'level2', 'product_ids': list(set(level2)) } )
+        if credentials: 
+            # this code was copied from https://github.com/danpaquin/gdax-python
+            timestamp = str(time.time())
+            message = timestamp + 'GET' + '/users/self/verify'
+            message = message.encode('ascii')
+            hmac_key = base64.b64decode(credentials['b64secret'])
+            signature = hmac.new(hmac_key, message, hashlib.sha256)
+            signature_b64 = base64.b64encode(signature.digest()).decode('utf-8').rstrip('\n')
+            subscription['signature'] = signature_b64
+            subscription['key']       = credentials['key']
+            subscription['passphrase']= credentials['passphrase']
+            subscription['timestamp'] = timestamp
+
+        return subscription
+    
+
+    # ==============================================================================
+    # Controls opening, reseting and closing a connection
+    # ==============================================================================
+    
+
+    def open(self):
         """Opens a new connection to the websocket"""
         try:
-            if production: 
-                self.url = 'wss://ws-feed.pro.coinbase.com'
-            else:
-                self.url = 'wss://ws-feed-public.sandbox.pro.coinbase.com'    
-
-            if self.ws:
-                print("Closing existing websocket connection")
-                self.close()
-
-            self.set_accepted_message_types(channels)
-            self.data = { **self.set_data(products, increments), **self.data }
-            self.subscription = self.subscription_message( products, channels, credentials )
-            
+            self.error_count = 0
             self.conn_thread = Thread(target=self.connect, name='Websocket Connection')
             self.conn_thread.start()
         except Exception as e:
+            self.conn_thread.join()
             self.on_error(self.ws, "Error from openning connection. Error -> {}".format(e))
 
+    def close(self):
+        """Sets the terminate variable to true to indicate that the connection was closed \n by the client. This will prevent self.start from restarting when the closed message is received"""
+        self.terminated = True
+        if self.ws:
+            self.ws.close()
+            self.ws = None
+            if self.conn_thread:
+                self.conn_thread.join()
 
-            
+
+
+
+
+
+
+
+
+
+
+
+
+class Ticker():
+    def __init__(self):
+        self.live = None
+
+    def update(self, ticker):
+        """Receives the ticker updates and retains the history and updates the 'current' attribute in self.data.ticker"""
+        for col in ['price', 'last_size', 'best_bid', 'best_ask','high_24h','low_24h','open_24h','volume_24h','volume_30d' ]:
+            try:
+                if '.' in ticker[col]:
+                    ticker[col] = float(ticker[col].rstrip('0'))
+                else:
+                    ticker[col] = float(ticker[col])
+            except:
+                ticker[col] = 0.0
+        if 'time' in ticker:
+            ticker['datetime'] = ticker['time']
+        ticker['time']     = time.time()
+        self.live = ticker
+                    
             
 class OHLC():
     def __init__(self, product, increment, production=True):
@@ -415,9 +436,9 @@ class OHLC():
 class OrderManagement():
     def __init__(self):
         self.records         = []
-        self.all_columns     = ['funds','limit_price','maker_order_id','maker_user_id', 'new_funds', 'old_funds', 'new_size', 'old_size', 'currency_on_hold', 'on_hold', 'order_id', 'order_type', 'price', 'product_id', 'reason','remaining_size', 'sequence', 'side', 'size', 'stop_price', 'stop_type','taker_fee_rate', 'taker_order_id', 'time', 'trade_id','type','USD','BTC','LTC','ETH','BCH','ETC' ]
+        self.all_columns     = ['funds','limit_price','maker_order_id','maker_user_id', 'new_funds', 'old_funds', 'new_size', 'old_size', 'currency_on_hold', 'on_hold', 'order_id', 'order_type', 'price', 'product_id', 'reason','remaining_size', 'sequence', 'side', 'size', 'stop_price', 'stop_type','taker_fee_rate', 'taker_order_id', 'time', 'trade_id','type','USD','BTC','LTC','ETH','BCH','ETC','ZRX' ]
         self.numeric_columns = ['funds','limit_price','new_funds','new_size','old_size','old_funds','price','remaining_size','size','on_hold','stop_price','taker_fee_rate']
-        self.order_columns   = ['sequence','order_id','create_time','update_time','product_id','order_type','side','stop_price','price','size','currency_on_hold','on_hold','USD','BTC','LTC','ETH','BCH','ETC','taker_fee_rate','status']
+        self.order_columns   = ['sequence','order_id','create_time','update_time','product_id','order_type','side','stop_price','price','size','currency_on_hold','on_hold','USD','BTC','LTC','ETH','BCH','ETC','ZRX','taker_fee_rate','status']
         self.orders          = pd.DataFrame(data=[], columns=self.order_columns)
         self.order_id_log    = []
 
@@ -495,7 +516,7 @@ class OrderManagement():
         
         if   existing_order['order_id'] == order['taker_order_id']:
             multiplier = -(multiplier)
-            fee = 0.0025 if 'BTC' in order['product_id'] else 0.003
+            fee = 0.0025 if 'BTC' == order['product_id'].split('-')[0] else 0.003
             order = { **existing_order, **{ key: order[key] for key in ['sequence','update_time','price','size'] }, **{ 'status': 'filled', 'taker_fee_rate': fee, 'on_hold': 0 } }
         
         elif existing_order['order_id'] == order['maker_order_id']:
@@ -504,6 +525,7 @@ class OrderManagement():
             
         pairs = order['product_id'].split('-')
         
+        #fee = 0 #<-- I dont think this is applying the fees as i expect
         order[pairs[0]] += (-(multiplier)*size)
         order[pairs[1]] += (multiplier*((price * size) + (-(multiplier)*(price * size * fee))))
         return order
@@ -555,9 +577,10 @@ class OrderManagement():
 
 class OrderBookManagement():
     def __init__(self):
-        self.book              = pd.DataFrame([],columns=['price','size','side'])
+        self.book              = pd.DataFrame([[0,0,'-']],columns=['price','size','side']).set_index('price')
         self.snapshot_received = False
         self.backlog           = []
+        self.errors            = []
 
     def bids(self, remove_zeros=True):
         return self.book[ (self.book['side']=='bids') & (self.book['size'] > (0 if remove_zeros else -1)) ].sort_index(ascending=False).reset_index()[['price','size']]
@@ -565,41 +588,46 @@ class OrderBookManagement():
     def asks(self, remove_zeros=True):
         return self.book[ (self.book['side']=='asks') & (self.book['size'] > (0 if remove_zeros else -1)) ].sort_index(ascending=True).reset_index()[['price','size']]
 
-    def l2update(self, orders):
+    def l2update______(self, orders):
         for order in orders['changes'] + self.backlog:
             try:
                 self.backlog.remove(order)
             except:
                 pass
 
-            order = [
-                float(order[1].rstrip('0')),
-                float(order[2]),
-                'bids' if order[0]=='buy' else 'asks'
-            ]
             try:
+                order = [
+                    float(order[1]),
+                    float(order[2]),
+                    'bids' if order[0]=='buy' else 'asks'
+                ]
                 self.book.loc[ order[0], ['size','side'] ] = order[1:] 
             except Exception as e:
                 raise Exception("{} attempting to update {}".format(e, ', '.join(order)))
 
-
+    def l2update(self, orders):
+        orders = pd.DataFrame(orders['changes'], columns=['side','price','size']).apply(pd.to_numeric, **{'errors':'ignore'})
+        self.book = pd.concat([self.book, orders]).reset_index(drop=True).drop_duplicates(subset='price', keep='last')
+                
     def snapshot(self, orders):
+        book = pd.concat([
+                   pd.DataFrame( data=orders['bids'], columns=['price','size'] ).head(250)[['price','size']].apply(pd.to_numeric, **{'errors':'ignore'}),
+                   pd.DataFrame( data=orders['asks'], columns=['price','size'] ).head(250)[['price','size']].apply(pd.to_numeric, **{'errors':'ignore'})
+               ], keys=['buy','sell']).reset_index().drop('level_1',axis=1)
+        book.columns = ['side','price','size']
+        self.book = book[['price','size','side']]
         self.snapshot_received = True
-        for side in ['bids','asks']:
-            df = pd.DataFrame( data=orders[side], columns=['price','size'] ).head(250)[['price','size']].apply(pd.to_numeric, **{'errors':'ignore'})
-            df['side'] = side
-            self.book = pd.concat( [self.book, df] )
-        self.book.set_index('price', inplace=True)
 
     def update(self, message):
         """Receives the level 2 snapshot and the subsequent updates and updates the orderbook"""
         try:
-            if self.snapshot_received:
-                self.l2update(message)
+            if message['type'] == 'l2update':
+                if self.snapshot_received:
+                    self.l2update(message)
+                else:
+                    self.backlog += message['changes']
             elif message['type'] == 'snapshot':
                 self.snapshot(message)
-            elif message['type'] == 'l2update': # at this point we have not received the snapshot object
-                self.backlog += message['changes']
         except Exception as e:
             raise Exception("Error processing {} OrderBook update: Message -> {}".format(message['product_id'], e))
       
