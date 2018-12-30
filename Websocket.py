@@ -38,6 +38,41 @@ class Client():
     production : Boolean. if set to True the websocket will connect via url 'wss://ws-feed.pro.coinbase.com' 
                  else if set to False the websocket will connect via url 'wss://ws-feed-public.sandbox.pro.coinbase.com'
 
+    @KEY METHODS:
+    self.orderbook('BTC-USD')
+    >>> 
+        price     size      side
+        7037.95   0.000000  asks
+        7036.54   0.000000  bids
+        7036.16   0.000000  asks
+
+    self.ticker('BTC-USD')
+    >>>
+        {
+            'best_ask': 6423.08,
+            'best_bid': 6422.59,
+            'high_24h': 6485.76,
+            'last_size': 0.00511036,
+            'low_24h': 6003.0,
+            'open_24h': 6418.01,
+            'price': 6423.08,
+            'product_id': 'BTC-USD',
+            'sequence': 6555468983,
+            'side': 'buy',
+            'time': 1533828452.0009532,
+            'trade_id': 48603077,
+            'type': 'ticker',
+            'volume_24h': 14287.80656342,
+            'volume_30d': 307449.79720148}
+        }
+
+    self.ohlc('BTC-USD','1day')
+    >>> 
+                          time      low     high     open    close     volume
+        1537465260  1537465260  6400.15  6402.96  6400.16  6402.95  20.687342
+        1537465320  1537465320  6402.96  6405.00  6402.96  6405.00   4.263147
+
+
     @variables:
     data   : dictionary data variable stores the consumable websocket messages post processing. structure
              'BTC-USD': { 
@@ -85,8 +120,7 @@ class Client():
                 Index: [price]
 
                 example:
-                          size      side
-                price                   
+                price     size      side
                 7037.95   0.000000  asks
                 7036.54   0.000000  bids
                 7036.16   0.000000  asks
@@ -135,12 +169,12 @@ class Client():
         self._ohlc           = ohlc
         self._credentials    = credentials
 
-        self.message_count  = 0
+        self.updated_time   = time.time() + 30
         
         if self.production:  
             self.url        = 'wss://ws-feed.pro.coinbase.com'
-        self.SUBSCRIPTION   = self.subscription( self.ticker, self._level2, self._user, self._credentials )
-        self.data           = self.set_data( self.SUBSCRIPTION, self.ohlc, self.production )
+        self._subscription  = self.subscription( self._ticker, self._level2, self._user, self._credentials )
+        self.data           = self.set_data( self._subscription, self._ohlc, self.production )
         self.messages       = []
         self.ws             = None
         self.conn_thread    = None
@@ -155,15 +189,18 @@ class Client():
 
     def on_message(self, ws, message):
         """Appends the message from the ws to the list of messages to process later"""
-        self.message_count += 1
         message = json.loads(message)
         if   message['type'] == 'error':
             self.on_error(None, message['message'])
         elif message['type'] == 'subscriptions':
             print("Subscribed to {}".format(', '.join([ channel['name'] for channel in message['channels'] ])))
-        elif message['type'] in self.accepted_message_type:
-            self.messages.append(message)
-        
+        else:
+            if ((message['type']=='ticker' and message['product_id'] in self._ticker) or 
+                (message['type'] in ["snapshot", "l2update"] and message['product_id'] in self._level2) or 
+                (message['type'] in ["received","open","done","match","change","activate"] )):
+                self.messages.append(message)
+            elif message['type']=='heartbeat':
+                self.updated_time = time.time()
 
     def on_error(self, ws, error):
         """Prints the errors"""
@@ -180,14 +217,14 @@ class Client():
             print("Connection closed")
         else:
             print("{}: Connection unexpectedly closed. Re-establishing a connection.".format(datetime.datetime.now()))
-            self.SUBSCRIPTION   = self.subscription( self.ticker, self._level2, self._user, self._credentials )
+            self._subscription   = self.subscription( self._ticker, self._level2, self._user, self._credentials )
             self.connect()
         
         
     def on_open(self, ws):
         """Sends the initial subscription message to the server"""
         self.terminated = False
-        ws.send(json.dumps(self.SUBSCRIPTION))
+        ws.send(json.dumps(self._subscription))
         print("Connected. Awaiting subscription message. {}".format(self.url))
 
     # ==============================================================================
@@ -215,23 +252,24 @@ class Client():
             
     def monitor(self):
         """Monitors the messages received and processes them individually"""
-        messages_processed = 0       
         while not self.terminated:
             try:
-                if messages_processed < self.message_count:
-                    pool = ThreadPool(4)
-                    pool.map(self.process, self.messages)
-                    pool.close()
-                    pool.join()
-                else:
-                    if self.ws:
-                        self.ws.close()
+                if (time.time() - self.updated_time) < 5:
+                    #pool = ThreadPool(10)
+                    #pool.map(self.process, self.messages)
+                    #pool.close()
+                    #pool.join()
+                    messages = self.messages.copy()
+                    for message in messages:
+                        self.process(message)
+                elif self.ws:
+                    self.updated_time += 30
+                    self.ws.close()
             except Exception as e:
                 self.on_error(None, "Monitoring Error: {}".format(e))
                 continue
             finally:
-                messages_processed = self.message_count
-                time.sleep(1)   
+                time.sleep(0.1)   
                 
     def process_tickers(self, message):
         if 'ticker' in self.data[message['product_id']]:
@@ -248,19 +286,18 @@ class Client():
         """This method removes the message received from the list of messages, then routes \n the message to the appropriate function"""
         try:
             self.messages.remove(message)
-        except:
+        except ValueError:
             pass # nothing to see here, just a message that was already processed and is not on the list any more
+        except Exception as e:
+            print('error removing message from self.message:', e)
         
         try:
-            if message['type'] in self.accepted_message_type[1:]:
-                if message['type'] in ["ticker"]:
-                    self.process_tickers(message)
-                elif message['type'] in ["snapshot", "l2update"]:
-                    self.process_orderbook(message)
-                elif message['type'] in ["received","open","done","match","change","activate"] and 'user' in self.data:
-                    self.data['user'].update( message )
-            elif message['type'] == 'error':
-                self.on_error(None, message['message'])
+            if   message['type'] in ["ticker"]:
+                self.process_tickers(message)
+            elif message['type'] in ["snapshot", "l2update"]:
+                self.process_orderbook(message)
+            elif message['type'] in ["received","open","done","match","change","activate"] and 'user' in self.data:
+                self.data['user'].update( message )
         except Exception as e:
             raise Exception("Process raised an error: {}\n\t{}".format(e,message))
 
@@ -268,21 +305,28 @@ class Client():
     # Data exploration methods
     # ==============================================================================
     def orderbook(self, product):
-        return self.data[product]['orderbook'].book
+        return self.data[product.upper()]['orderbook'].book
 
     def ticker(self, product):
-        return self.data[product]['ticker'].live
+        return self.data[product.upper()]['ticker'].live
 
     def ohlc(self, product, ohlc):
-        return self.data[product]['ohlc'][ohlc].candles
-
+        return self.data[product.upper()]['ohlc'][ohlc].candles
+    
+    def orders(self, ids=[]):
+        orders = self.data['user'].orders
+        if ids == '*':
+            return orders
+        else:
+            ids = ids if type(ids)==list else [ids]
+            return orders[ orders['order_id'].isin(ids) ]
     # ==============================================================================
     # the following methods handle the creation of the subscription 
     # and managing connections
     # ==============================================================================
 
     def set_data(self, SUBSCRIPTION, OHLC_, PRODUCTION):
-        data = { **{ product: { } for product in self.SUBSCRIPTION['product_ids'] } }
+        data = { **{ product: { } for product in self._subscription['product_ids'] } }
         for channel in SUBSCRIPTION['channels']:
             if not isinstance(channel, str):
                 if channel['name'] == 'ticker':
@@ -363,21 +407,27 @@ class Client():
 class Ticker():
     def __init__(self):
         self.live = None
+        self.history = []
 
     def update(self, ticker):
+        orig = ticker.copy()
         """Receives the ticker updates and retains the history and updates the 'current' attribute in self.data.ticker"""
         for col in ['price', 'last_size', 'best_bid', 'best_ask','high_24h','low_24h','open_24h','volume_24h','volume_30d' ]:
             try:
-                if '.' in ticker[col]:
+                if type(ticker[col]) == str and '.' in ticker[col]:
                     ticker[col] = float(ticker[col].rstrip('0'))
                 else:
                     ticker[col] = float(ticker[col])
-            except:
+            except KeyError:
                 ticker[col] = 0.0
-        if 'time' in ticker:
-            ticker['datetime'] = ticker['time']
+            except:
+                ticker[col] = ticker[col]
+                
+        ticker['datetime'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ticker['time']     = time.time()
         self.live = ticker
+        self.history.append([orig, ticker])
+        self.history = self.history[-300:]
                     
             
 class OHLC():
@@ -419,15 +469,19 @@ class OHLC():
             candle    = self.candles[[ 'time', 'low', 'high', 'open', 'close', 'volume' ]].iloc[-1].to_dict()
             price     = ticker['price']
             volume    = ticker['last_size']
-            next_time = candle['time'] + self.granularity
+            next_time = self.candles['time'].iloc[2:].max() + self.granularity
             if ticker['time'] >= next_time:
                 candle = {'time': next_time, 'low': price, 'high': price, 'open': price, 'close': price, 'volume': volume }
             else:
-                candle['low']    = np.min([price, candle['low']])
-                candle['high']   = np.max([price, candle['high']])
+                candle['low']    = np.nanmin([price, candle['low']])
+                candle['high']   = np.nanmax([price, candle['high']])
                 candle['close']  = price
                 candle['volume']+= volume
             self.candles.loc[ candle['time'], list(candle.keys()) ] = list(candle.values())
+        except ValueError as e:
+            if e == 'cannot reindex from a duplicate axis':
+                self.candles = self.candles.drop_duplicates(subset='time', keep='last')
+                self.update(ticker)
         except Exception as e:
             print("Error in {} {} ohlc update".format(self.product, self.increment))
             raise Exception(e)
@@ -436,144 +490,138 @@ class OHLC():
 class OrderManagement():
     def __init__(self):
         self.records         = []
-        self.all_columns     = ['funds','limit_price','maker_order_id','maker_user_id', 'new_funds', 'old_funds', 'new_size', 'old_size', 'currency_on_hold', 'on_hold', 'order_id', 'order_type', 'price', 'product_id', 'reason','remaining_size', 'sequence', 'side', 'size', 'stop_price', 'stop_type','taker_fee_rate', 'taker_order_id', 'time', 'trade_id','type','USD','BTC','LTC','ETH','BCH','ETC','ZRX' ]
-        self.numeric_columns = ['funds','limit_price','new_funds','new_size','old_size','old_funds','price','remaining_size','size','on_hold','stop_price','taker_fee_rate']
-        self.order_columns   = ['sequence','order_id','create_time','update_time','product_id','order_type','side','stop_price','price','size','currency_on_hold','on_hold','USD','BTC','LTC','ETH','BCH','ETC','ZRX','taker_fee_rate','status']
-        self.orders          = pd.DataFrame(data=[], columns=self.order_columns)
-        self.order_id_log    = []
-
-
-    def prepare_order(self, order):
+        self.currencies      = ['USD','BTC','LTC','ETH','BCH','ETC','ZRX']
+        self.numeric         = ['funds','limit_price', 'new_funds', 'old_funds','new_size','old_size','currency_on_hold','on_hold','price','remaining_size','size','stop_price','taker_fee_rate' ]
+        self.non_numeric     = ['maker_order_id','maker_user_id','order_id','order_type','product_id','reason','time','trade_id','taker_order_id','type','stop_type']
+        self.columns         = ['time','order_id','create_time','update_time','product_id','order_type','side','stop_price','price','size','currency_on_hold','on_hold','taker_fee_rate','status'] + self.currencies
+        self.orders          = pd.DataFrame([], columns=self.columns)
+        
+    def prep(self, order):
         """Method used to create the update dict to process"""
-        update= {
-            'create_time': order['time'],
-            'update_time': order['time'],
-            'status': order['type'],
-        }
-        for col in self.all_columns:
+        update = {}
+        for col in list(set(self.numeric + self.non_numeric + self.currencies + self.columns)):
             try:
-                if col in self.numeric_columns:
+                if col in self.numeric:
                     value = float(order[col])
                 else:
                     value = order[col]
                 update[col] = value
             except:
-                if col == 'sequence':
-                    update[col] = randint(1,10000)
-                else:
-                    update[col] = 0.0
+                update[col] = 0.0
                 continue
-        update['sequence'] = int(update['sequence'])
         update['currency_on_hold'] = order['product_id'][-3:] if order['side'] == 'buy' else order['product_id'][:3]
-        return update
+        update['create_time'] = pd.to_datetime(order['time'])
+        update['update_time'] = pd.to_datetime(order['time'])
+        update['time']        = time.time()
+        update['status']      = order['type']
+        return pd.Series(update).fillna(0)
         
-    def rename(self, obj, names):
-        old = list(names.keys())
-        new = list(names.values())
-        for i in range(len(old)):
-            obj[new[i]] = obj[old[i]]
-        return obj
-    
-    def received_order(self, order):
-        self.order_id_log.append(order['order_id'])# log the order_id
-        existing_order = self.orders[ self.orders['order_id']== order['order_id'] ][['sequence','order_type','status']]
-        if len(existing_order):
-            return { **{ key: order[key] for key in self.order_columns }, **existing_order.iloc[0].to_dict() }
-        else:
-            return { key: order[key] for key in self.order_columns }
-        
-    def opened_order(self, order):
-        sequence = self.orders[ (self.orders['order_id'] == order['order_id']) & (~self.orders['status'].isin(['canceled','filled'])) ].index.min()
-        order['sequence'] = sequence or order['sequence']
-        order = self.rename(order, {'remaining_size':'size'})
-        order['on_hold'] = order['price'] * order['size'] if order['side'] == 'buy' else order['size']
-        return { key: order[key] for key in ['sequence','size','update_time','status','on_hold'] }
 
-    def stop_order(self, order):
-        self.order_id_log.append(order['order_id'])# log the order_id
-        order = self.rename(order, {'stop_price':'price', 'limit_price':'stop_price', 'stop_type':'order_type'})
-        order['on_hold'] = order['funds'] if order['side'] == 'buy' else order['size']
-        return { key: order[key] for key in ['sequence','order_id','product_id','side','size','taker_fee_rate','create_time','update_time','status','stop_price','price','order_type','on_hold','currency_on_hold']}
-    
-    def change_order(self, order):
+    def find_order(self, ids, order_type='limit,market,entry,loss', status='received,open,activate,match,done,change,filled,canceled'):
         try:
-            order = self.rename(order, {'new_size':'size'} )
+            ids = ids if type(ids) == list else [ids]
+            return self.orders[ (self.orders.order_id.isin(ids)) ].iloc[0]# & (self.order.order_type.isin(order_type.split(','))) & (self.order.status.isin(status.split(',')))
         except:
-            order = self.rename(order, {'new_funds':'size'})
+            return pd.Series()
+        
+    def received(self, order):
+        existing = self.find_order(order.order_id)
+        order    = existing if not existing.empty else order[self.columns]
+        return order
             
-        order['sequence'] = self.orders[ self.orders['order_id'] == order['order_id'] ].index.min()
-        return { key: order[key] for key in ['sequence', 'size'] }
+    def opened(self, order):
+        existing      = self.find_order(order.order_id)
+        order['size']    = order.remaining_size
+        order.on_hold = order.price * order['size'] if order.side == 'buy' else order['size']
+        if not existing.empty:
+            existing.update_time = order.update_time
+            existing.status      = order.status
+            existing.on_hold     = order.on_hold
+            return existing
+        else:
+            return order[self.columns]
+        
+    def stop(self, order):
+        order.price      = order.stop_price
+        order.stop_price = order.limit_price
+        order.order_type = order.stop_type
+        order.on_hold    = order.funds if order.side == 'buy' else order['size']
+        return order[self.columns]
     
-    def match_order(self, order):
-        price = order['price']
-        size = order['size']
-        fee = 0
-        multiplier =  1
-        if order['side'] == 'buy': 
-            multiplier = -1
-
-        existing_order = self.orders[ self.orders['order_id'].isin([ order['taker_order_id'], order['maker_order_id'] ]) ].iloc[0].to_dict()
+    def match(self, order):
+        price          = order.price
+        size           = order['size']
+        pairs          = order['product_id'].split('-')
+        fee            = 0
+        multiplier     = 1 if order.side == 'sell' else -1
+        existing       = self.find_order([order.maker_order_id, order.taker_order_id])
+        order.order_id = order.taker_order_id
         
-        if   existing_order['order_id'] == order['taker_order_id']:
-            multiplier = -(multiplier)
-            fee = 0.0025 if 'BTC' == order['product_id'].split('-')[0] else 0.003
-            order = { **existing_order, **{ key: order[key] for key in ['sequence','update_time','price','size'] }, **{ 'status': 'filled', 'taker_fee_rate': fee, 'on_hold': 0 } }
-        
-        elif existing_order['order_id'] == order['maker_order_id']:
-            existing_order['on_hold'] -= price * size if existing_order['side']=='buy' else size  
-            order = { **existing_order, **{ key: order[key] for key in ['update_time'] }}
+        if not existing.empty:
+            if   existing.order_id == order.maker_order_id: # i'm the maker
+                existing.on_hold    -= price * size if existing.side =='buy' else size
+                existing.update_time = order.update_time
             
-        pairs = order['product_id'].split('-')
+            elif existing.order_id == order.taker_order_id: # i'm the taker
+                multiplier = -(multiplier)
+                fee        = 0.0025 if 'BTC' == pairs[0] else 0.003
+                existing.status         = 'filled'
+                existing.taker_fee_rate = fee
+                existing.on_hold        = 0
+                existing.price          = order.price
+                existing['size']        = order['size']
+                existing.time           = order.time
+
+            order = existing
         
-        #fee = 0 #<-- I dont think this is applying the fees as i expect
         order[pairs[0]] += (-(multiplier)*size)
         order[pairs[1]] += (multiplier*((price * size) + (-(multiplier)*(price * size * fee))))
-        return order
+        return order[self.columns]
 
-    def done_order(self, order):
-        existing_order = self.orders[ (self.orders['order_id'] == order['order_id'] ) & (~self.orders['status'].isin(['filled','canceled'])) ].iloc[0].to_dict()
-        existing_order['status'] = order['reason']
-        return { **{ key: existing_order[key] for key in ['sequence','status'] }, **{ 'on_hold': 0.0 } }
+    def done(self, order):
+        existing = self.find_order(order.order_id)
+        if not existing.empty:
+            existing.update_time = order.update_time
+            existing.status      = order.reason
+            existing.on_hold     = 0.0
+            return existing
+        else:
+            order['order_type'] = 'unknown'
+            return order[self.columns]
 
-
-    def update(self, order):
-        """This method receives and processes orders submitted by the client"""
-        self.records.append(order)
-        
-        order      = self.prepare_order(order)
-        order_type = order['type']
-        
+    def update(self, order): # 'received','open','activate','match','done','change'
         try:
-            if order_type in ['received','open','activate','match','done','change']:
-                UPDATE = None
-
-                if   order_type in ['received']:
-                    UPDATE = self.received_order(order)
-
-                elif order_type in ['open'] and order['order_id'] in self.order_id_log:
-                    UPDATE = self.opened_order(order)
-
-                elif order_type in ['activate']:
-                    UPDATE = self.stop_order(order)
-
-                elif order_type in ['match'] and (order['maker_order_id'] in self.order_id_log or order['taker_order_id'] in self.order_id_log):
-                    UPDATE = self.match_order(order)
-
-                elif order_type in ['done'] and order['order_id'] in self.order_id_log:
-                    UPDATE = self.done_order(order)
-                
-                elif order_type in ['change'] and order['order_id'] in self.order_id_log:
-                    UPDATE = self.change_order(order)
-                
-                if UPDATE:
-                    self.orders.loc[ UPDATE['sequence'], list(UPDATE.keys()) ] = list(UPDATE.values())
-            else:
-                raise Exception("Message type is not recognized. '{}' was not handled".format(order_type))
+            self.records.append(order)
+            order  = self.prep(order)
+            update = pd.Series()
             
+            if   order.type == 'received':
+                update = self.received(order)
+                
+            elif order.type == 'open':
+                update = self.opened(order)
+                
+            elif order.type == 'activate':
+                update = self.stop(order)
+            
+            elif order.type == 'match':
+                update = self.match(order)
+                
+            elif order.type == 'done':
+                update = self.done(order)
+                
+            if not update.empty:
+                existing_orders = self.orders
+                new_order       = pd.DataFrame([update.to_dict()]).set_index('time',False)
+                self.orders = pd.concat( [ existing_orders, new_order ], sort=True )
+                
             self.orders.fillna(0,inplace=True)
+            self.orders.drop_duplicates(subset=['order_id','time'], keep='last', inplace=True)
+            self.orders = self.orders[((self.orders.status=='filled') & (self.orders[self.currencies].apply(sum, axis=1)!=0)) | (self.orders.status!='filled') ]
         except Exception as e:
-            raise Exception("Error updating orders. Will try to update again. Error message: {} \n \n {}".format(e, order))
+            raise Exception("Error updating orders. Error message: {}\n{}".format(e, order))
 
+            
 
 class OrderBookManagement():
     def __init__(self):
@@ -588,26 +636,9 @@ class OrderBookManagement():
     def asks(self, remove_zeros=True):
         return self.book[ (self.book['side']=='asks') & (self.book['size'] > (0 if remove_zeros else -1)) ].sort_index(ascending=True).reset_index()[['price','size']]
 
-    def l2update______(self, orders):
-        for order in orders['changes'] + self.backlog:
-            try:
-                self.backlog.remove(order)
-            except:
-                pass
-
-            try:
-                order = [
-                    float(order[1]),
-                    float(order[2]),
-                    'bids' if order[0]=='buy' else 'asks'
-                ]
-                self.book.loc[ order[0], ['size','side'] ] = order[1:] 
-            except Exception as e:
-                raise Exception("{} attempting to update {}".format(e, ', '.join(order)))
-
     def l2update(self, orders):
         orders = pd.DataFrame(orders['changes'], columns=['side','price','size']).apply(pd.to_numeric, **{'errors':'ignore'})
-        self.book = pd.concat([self.book, orders]).reset_index(drop=True).drop_duplicates(subset='price', keep='last')
+        self.book = pd.concat([self.book, orders]).reset_index(drop=True).drop_duplicates(subset='price', keep='last')[['price','size','side']]
                 
     def snapshot(self, orders):
         book = pd.concat([
