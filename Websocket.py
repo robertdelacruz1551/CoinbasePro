@@ -180,10 +180,11 @@ class Client():
         self.conn_thread    = None
         self.terminated     = False
         self.error_count    = 0
+        self.max_errors_allowed = 1000 
 
         self.PRODUCTS       = ['BTC-USD','LTC-USD','ETH-USD','ETC-USD','LTC-BTC','ETH-BTC','ETC-BTC','BCH-USD','BCH-BTC','ZRX-USD','ZRX-BTC']
         self.accepted_message_type = ["error","ticker","snapshot","l2update","received","open","done","match","change","activate"] 
-        self.max_errors_allowed = 100    
+           
   
     
 
@@ -245,7 +246,8 @@ class Client():
                 keep_running = True
             )
             self.ws.run_forever()
-            monitor.join()
+            print("Disconnected")
+            monitor.join(timeout=30)
         except Exception as e:
             monitor.join()
             raise Exception('Connection failed. Error {}'.format(e))
@@ -255,15 +257,16 @@ class Client():
         while not self.terminated:
             try:
                 if (time.time() - self.updated_time) < 5:
-                    #pool = ThreadPool(10)
-                    #pool.map(self.process, self.messages)
-                    #pool.close()
-                    #pool.join()
                     messages = self.messages.copy()
+                    # procs    = np.min([ len(messages), 9 ]) + 1
+                    # pool     = ThreadPool(procs)
+                    # pool.map(self.process, messages)
+                    # pool.close()
+                    # pool.join()
                     for message in messages:
                         self.process(message)
                 elif self.ws:
-                    self.updated_time += 30
+                    self.updated_time += 10
                     self.ws.close()
             except Exception as e:
                 self.on_error(None, "Monitoring Error: {}".format(e))
@@ -281,7 +284,12 @@ class Client():
     def process_orderbook(self, message):
         if 'orderbook' in self.data[message['product_id']]:
             self.data[message['product_id']]['orderbook'].update( message )
-        
+
+    def process_orders(self, message):
+        unprocessed_order = self.data['user'].update( message )
+        if unprocessed_order:
+            self.messages.append(unprocessed_order)
+
     def process(self, message):
         """This method removes the message received from the list of messages, then routes \n the message to the appropriate function"""
         try:
@@ -297,7 +305,7 @@ class Client():
             elif message['type'] in ["snapshot", "l2update"]:
                 self.process_orderbook(message)
             elif message['type'] in ["received","open","done","match","change","activate"] and 'user' in self.data:
-                self.data['user'].update( message )
+                self.process_orders(message)
         except Exception as e:
             raise Exception("Process raised an error: {}\n\t{}".format(e,message))
 
@@ -313,13 +321,14 @@ class Client():
     def ohlc(self, product, ohlc):
         return self.data[product.upper()]['ohlc'][ohlc].candles
     
-    def orders(self, ids=[]):
-        orders = self.data['user'].orders
+    def orders(self, ids='*'):
+        orders  = self.data['user'].orders
+        columns = self.data['user'].columns
         if ids == '*':
-            return orders
+            return orders[columns]
         else:
             ids = ids if type(ids)==list else [ids]
-            return orders[ orders['order_id'].isin(ids) ]
+            return orders[ orders['order_id'].isin(ids) ][columns]
     # ==============================================================================
     # the following methods handle the creation of the subscription 
     # and managing connections
@@ -384,7 +393,10 @@ class Client():
             self.on_error(self.ws, "Error from openning connection. Error -> {}".format(e))
 
     def close(self):
-        """Sets the terminate variable to true to indicate that the connection was closed \n by the client. This will prevent self.start from restarting when the closed message is received"""
+        """
+        Sets the terminate variable to true to indicate that the connection was closed 
+        by the client. This will prevent self.start from restarting when the closed message is received
+        """
         self.terminated = True
         if self.ws:
             self.ws.close()
@@ -465,19 +477,26 @@ class OHLC():
         self.candles.sort_index(inplace=True)
             
     def update(self, ticker):
+        if type(ticker) != pd.Series:
+            ticker = pd.Series(ticker)
+            
         try:
-            candle    = self.candles[[ 'time', 'low', 'high', 'open', 'close', 'volume' ]].iloc[-1].to_dict()
-            price     = ticker['price']
-            volume    = ticker['last_size']
-            next_time = self.candles['time'].iloc[2:].max() + self.granularity
-            if ticker['time'] >= next_time:
-                candle = {'time': next_time, 'low': price, 'high': price, 'open': price, 'close': price, 'volume': volume }
+            candle    = self.candles[[ 'time', 'low', 'high', 'open', 'close', 'volume' ]].iloc[-1]
+            next_time = candle.time + self.granularity
+            if ticker.time >= next_time:
+                candle.time  = next_time
+                candle.open  = ticker.price
+                candle.high  = ticker.price
+                candle.low   = ticker.price
+                candle.close = ticker.price
+                candle.volume= ticker.last_size
             else:
-                candle['low']    = np.nanmin([price, candle['low']])
-                candle['high']   = np.nanmax([price, candle['high']])
-                candle['close']  = price
-                candle['volume']+= volume
-            self.candles.loc[ candle['time'], list(candle.keys()) ] = list(candle.values())
+                candle.high  = np.nanmax([ticker.price, candle.high])
+                candle.low   = np.nanmin([ticker.price, candle.low])
+                candle.close = ticker.price
+                candle.volume+= ticker.last_size
+            self.candles = self.candles.append(candle, ignore_index=True).drop_duplicates('time','last')
+            self.candles.index = self.candles.time.tolist()
         except ValueError as e:
             if e == 'cannot reindex from a duplicate axis':
                 self.candles = self.candles.drop_duplicates(subset='time', keep='last')
@@ -485,14 +504,16 @@ class OHLC():
         except Exception as e:
             print("Error in {} {} ohlc update".format(self.product, self.increment))
             raise Exception(e)
-                   
-            
+
+
+
 class OrderManagement():
     def __init__(self):
         self.records         = []
+        self.ready_to_process= []
         self.currencies      = ['USD','BTC','LTC','ETH','BCH','ETC','ZRX']
         self.numeric         = ['funds','limit_price', 'new_funds', 'old_funds','new_size','old_size','currency_on_hold','on_hold','price','remaining_size','size','stop_price','taker_fee_rate' ]
-        self.non_numeric     = ['maker_order_id','maker_user_id','order_id','order_type','product_id','reason','time','trade_id','taker_order_id','type','stop_type']
+        self.non_numeric     = ['maker_order_id','maker_user_id','user_id','order_id','order_type','product_id','reason','time','trade_id','taker_order_id','type','stop_type']
         self.columns         = ['time','order_id','create_time','update_time','product_id','order_type','side','stop_price','price','size','currency_on_hold','on_hold','taker_fee_rate','status'] + self.currencies
         self.orders          = pd.DataFrame([], columns=self.columns)
         
@@ -509,90 +530,103 @@ class OrderManagement():
             except:
                 update[col] = 0.0
                 continue
+        update = pd.Series(update).fillna(0)
         update['currency_on_hold'] = order['product_id'][-3:] if order['side'] == 'buy' else order['product_id'][:3]
         update['create_time'] = pd.to_datetime(order['time'])
         update['update_time'] = pd.to_datetime(order['time'])
-        update['time']        = time.time()
+        update['time']        = update.update_time.to_datetime64().astype('int64')//1e9
         update['status']      = order['type']
-        return pd.Series(update).fillna(0)
+        update['order_type']  = 'unknown' if not update['order_type'] else update['order_type']
+        return update#pd.Series(update).fillna(0)
         
 
-    def find_order(self, ids, order_type='limit,market,entry,loss', status='received,open,activate,match,done,change,filled,canceled'):
+    def find_order(self, ids):
         try:
             ids = ids if type(ids) == list else [ids]
-            return self.orders[ (self.orders.order_id.isin(ids)) ].iloc[0]# & (self.order.order_type.isin(order_type.split(','))) & (self.order.status.isin(status.split(',')))
+            return self.orders[ (self.orders.order_id.isin(ids)) ].iloc[0]
         except:
             return pd.Series()
         
     def received(self, order):
         existing = self.find_order(order.order_id)
-        order    = existing if not existing.empty else order[self.columns]
-        return order
+        if not existing.empty:
+            existing.create_time = order.create_time
+            existing.update_time = order.update_time
+            existing.order_type  = order.order_type
+            existing.side        = order.side
+            existing['size']     = order['size']
+            existing.price       = order.price
+            return existing[self.columns]
+        else:
+            return order[self.columns]
             
     def opened(self, order):
         existing      = self.find_order(order.order_id)
-        order['size']    = order.remaining_size
+        order['size'] = order.remaining_size
         order.on_hold = order.price * order['size'] if order.side == 'buy' else order['size']
-        if not existing.empty:
+        if existing.empty:
+            return order[self.columns]
+        else:
             existing.update_time = order.update_time
-            existing.status      = order.status
+            existing.size        = order.remaining_size
+            existing.status      = order.status if existing.status not in ['canceled','filled'] else existing.status
             existing.on_hold     = order.on_hold
             return existing
-        else:
-            return order[self.columns]
         
     def stop(self, order):
-        order.price      = order.stop_price
-        order.stop_price = order.limit_price
-        order.order_type = order.stop_type
-        order.on_hold    = order.funds if order.side == 'buy' else order['size']
-        return order[self.columns]
-    
-    def match(self, order):
-        price          = order.price
-        size           = order['size']
-        pairs          = order['product_id'].split('-')
-        fee            = 0
-        multiplier     = 1 if order.side == 'sell' else -1
-        existing       = self.find_order([order.maker_order_id, order.taker_order_id])
-        order.order_id = order.taker_order_id
-        
+        existing      = self.find_order(order.order_id)
         if not existing.empty:
-            if   existing.order_id == order.maker_order_id: # i'm the maker
-                existing.on_hold    -= price * size if existing.side =='buy' else size
-                existing.update_time = order.update_time
-            
-            elif existing.order_id == order.taker_order_id: # i'm the taker
-                multiplier = -(multiplier)
-                fee        = 0.0025 if 'BTC' == pairs[0] else 0.003
-                existing.status         = 'filled'
-                existing.taker_fee_rate = fee
-                existing.on_hold        = 0
-                existing.price          = order.price
-                existing['size']        = order['size']
-                existing.time           = order.time
+            existing.price      = order.stop_price
+            existing.stop_price = order.limit_price
+            existing.order_type = order.stop_type
+            existing.on_hold    = order.funds if order.side == 'buy' else order['size']
+            return existing
+        else:
+            order.price      = order.stop_price
+            order.stop_price = order.limit_price
+            order.order_type = order.stop_type
+            order.on_hold    = order.funds if order.side == 'buy' else order['size']
+            return order[self.columns]
 
+    def match(self, order):
+        maker           = order.maker_user_id==order.user_id
+        pairs           = order['product_id'].split('-')
+        size            = order['size']
+        price           = order.price
+        order.order_id  = order.maker_order_id if maker else order.taker_order_id
+        existing        = self.find_order(order.order_id)
+
+        if existing.empty:
+            return pd.Series()
+        else:
+            existing.update_time = order.update_time
+            existing['size']        = existing['size'] if maker else order['size']
+            existing.price          = existing.price   if maker else order.price
+            existing.time           = existing.time    if maker else order.time
+            existing.status         = existing.status  if maker or existing.status in ['filled','canceled'] else order.status
             order = existing
+            
+            multiplier      = 1 if order.side == 'sell' else -1
+            order[pairs[0]]+= (-(multiplier) * size)
+            order[pairs[1]]+= (multiplier*((price * size) + (-(multiplier)*(price * size * order.taker_fee_rate))))
+            order.on_hold  = (order.price * order['size']) + order[pairs[1]] if order.side == 'buy' else order['size'] + order[pairs[0]]
+            order.on_hold  = 0 if order.on_hold<0 else order.on_hold
+            return order[self.columns]  
         
-        order[pairs[0]] += (-(multiplier)*size)
-        order[pairs[1]] += (multiplier*((price * size) + (-(multiplier)*(price * size * fee))))
-        return order[self.columns]
-
     def done(self, order):
         existing = self.find_order(order.order_id)
         if not existing.empty:
             existing.update_time = order.update_time
             existing.status      = order.reason
             existing.on_hold     = 0.0
-            return existing
+            return existing[self.columns]
         else:
-            order['order_type'] = 'unknown'
+            order.status = order.reason
             return order[self.columns]
 
-    def update(self, order): # 'received','open','activate','match','done','change'
+    def update(self, original_order): # 'received','open','activate','match','done','change'
         try:
-            self.records.append(order)
-            order  = self.prep(order)
+            order  = self.prep(original_order)
             update = pd.Series()
             
             if   order.type == 'received':
@@ -610,16 +644,20 @@ class OrderManagement():
             elif order.type == 'done':
                 update = self.done(order)
                 
-            if not update.empty:
-                existing_orders = self.orders
-                new_order       = pd.DataFrame([update.to_dict()]).set_index('time',False)
-                self.orders = pd.concat( [ existing_orders, new_order ], sort=True )
+            if update.empty:
+                return original_order
+            else:
+                old_orders  = self.orders
+                new_order   = pd.DataFrame([update.to_dict()])#.set_index('time',False)
+                self.orders = pd.concat( [ old_orders, new_order ], sort=True, ignore_index=True )
+                self.records.append(original_order)
                 
             self.orders.fillna(0,inplace=True)
             self.orders.drop_duplicates(subset=['order_id','time'], keep='last', inplace=True)
-            self.orders = self.orders[((self.orders.status=='filled') & (self.orders[self.currencies].apply(sum, axis=1)!=0)) | (self.orders.status!='filled') ]
+            self.orders.loc[ self.orders.status.isin(['canceled','filled']), 'on_hold' ] = 0.0
         except Exception as e:
-            raise Exception("Error updating orders. Error message: {}\n{}".format(e, order))
+            print("Error updating orders. Error message: {}\n{}\n".format(e, order))
+            return original_order
 
             
 
